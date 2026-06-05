@@ -313,6 +313,7 @@ FTPWindowController::FTPWindowController(const NppData* npp)
 	  m_panelView(nullptr), m_outline(nullptr), m_queueTable(nullptr),
 	  m_outputView(nullptr), m_bridge(nullptr), m_toolbar(nullptr), m_panelHandle(nullptr),
 	  m_selected(nullptr), m_profileTree(nullptr), m_treeConnectedMode(false),
+	  m_pendingTerminate(false),
 	  m_contextProfile(nullptr), m_contextIsFolder(false), m_contextIsRoot(false),
 	  m_clipProfile(nullptr), m_clipIsCut(false), m_visible(false) {}
 
@@ -546,7 +547,16 @@ void FTPWindowController::HandleNotification(int message, int code, QueueOperati
 	}
 	if (message == (int)NotifyMessageRemove) {
 		for (size_t i = 0; i < m_activeOps.size(); i++) if (m_activeOps[i].op == op) { m_activeOps.erase(m_activeOps.begin()+i); break; }
-		RefreshQueue(); return;
+		RefreshQueue();
+		// Deferred teardown: this op is about to be deleted and the worker will go
+		// idle (m_performing=false) right after we ack below — only then is it safe
+		// to TerminateSession (which Deinitialize-waits on the worker).
+		if (m_pendingTerminate) {
+			m_pendingTerminate = false;
+			FTPSession* s = m_session;
+			dispatch_async(dispatch_get_main_queue(), ^{ if (s) s->TerminateSession(); });
+		}
+		return;
 	}
 	if (message == (int)NotifyMessageProgress) {
 		for (auto& a : m_activeOps) if (a.op == op) { a.progress = op->GetProgress(); break; }
@@ -568,7 +578,11 @@ void FTPWindowController::HandleNotification(int message, int code, QueueOperati
 			} else {
 				AppendOutput(2, "[NppFTP] Unable to connect");
 				OnDisconnect();
-				if (m_session) m_session->TerminateSession();
+				// Do NOT TerminateSession() here: it deletes the queue (incl. THIS
+				// still-performing op) and waits on the worker, which is blocked on
+				// this very notification's ack → deadlock/use-after-free. Flag it;
+				// we tear down once the op's Remove fires and the worker is idle.
+				m_pendingTerminate = true;
 			}
 			break; }
 		case QueueOperation::QueueTypeDisconnect: {
@@ -740,7 +754,14 @@ void FTPWindowController::ActionConnectSelected() {
 		ActionConnectProfile(m_profiles->at(0));   // fall back to the first profile
 	}
 }
-void FTPWindowController::ActionDisconnect() { if (m_session) m_session->TerminateSession(); RebuildTree(); }
+void FTPWindowController::ActionDisconnect() {
+	// Defer: if a queue op is mid-flight (worker blocked on a pending ack),
+	// TerminateSession would delete it and crash the ack. Let pending UI
+	// notifications drain first, then tear down.
+	FTPSession* s = m_session;
+	FTPWindowController* self = this;
+	dispatch_async(dispatch_get_main_queue(), ^{ if (s) { s->TerminateSession(); self->RebuildTree(); } });
+}
 void FTPWindowController::ActionRefresh() {
 	if (m_session && m_session->IsConnected()) m_session->GetDirectory("/");
 }

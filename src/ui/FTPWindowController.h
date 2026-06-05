@@ -127,6 +127,7 @@ private:
 	FileObject*     m_selected;     // currently-selected remote object
 	void*           m_profileTree;     // ProfileNode* root (disconnected tree)
 	bool            m_treeConnectedMode;  // tracks the outline's current item type
+	bool            m_pendingTerminate;   // tear down the session once the op is fully gone
 	FTPProfile*     m_contextProfile;  // right-clicked profile leaf / folder dummy
 	bool            m_contextIsFolder; // right-clicked node is a folder
 	bool            m_contextIsRoot;   // ...and it is the "Profiles" root
