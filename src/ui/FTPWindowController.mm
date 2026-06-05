@@ -29,8 +29,17 @@
 @end
 
 extern "C" NppData* NppFTP_HostData();
-extern "C" void NppFTP_ShowProfileDialog(vProfile* profiles, FTPSettings* settings);
+extern "C" void NppFTP_ShowProfileSettings(FTPProfile* profile);
 extern "C" void NppFTP_ShowGlobalSettings(FTPSettings* settings);
+extern "C" void NppFTP_SaveSettings();
+
+// Sentinels for the disconnected "Profiles" folder tree (no FileObjects exist
+// then). Low addresses never collide with heap FileObject pointers, and we only
+// use them when RootObject()==nullptr.
+static void* const kProfilesRoot = (void*)(intptr_t)1;
+static inline void* profileItemPtr(NSInteger i) { return (void*)(intptr_t)(2 + i); }
+static inline NSInteger profileItemIndex(void* p) { return (NSInteger)((intptr_t)p - 2); }
+static NSString* nsutf8(const char* s) { return [NSString stringWithUTF8String:s ? s : ""]; }
 static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 	NppData* d = NppFTP_HostData();
 	return d->_sendMessage(d->_nppHandle, msg, w, l);
@@ -45,40 +54,81 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 
 @implementation NppFTPBridge
 
-// The outline shows the connected remote tree (root = session RootObject); when
-// disconnected it shows the profile list.
-- (id)rootObject { return [NSValue valueWithPointer:self.ctrl->RootObject()]; }
-
+// Connected → the remote FileObject tree (root = session RootObject).
+// Disconnected → a synthetic "Profiles" folder (kProfilesRoot) with the saved
+// profiles as leaf children, matching the Windows panel.
 - (NSInteger)outlineView:(NSOutlineView*)ov numberOfChildrenOfItem:(id)item {
-	FileObject* fo = item ? (FileObject*)[(NSValue*)item pointerValue] : self.ctrl->RootObject();
-	if (fo) return fo->GetChildCount();
-	vProfile* p = self.ctrl->Profiles();   // may be null before Init()
-	return p ? (NSInteger)p->size() : 0;
+	FTPWindowController* c = self.ctrl;
+	if (c->RootObject()) {  // connected
+		FileObject* fo = item ? (FileObject*)[(NSValue*)item pointerValue] : c->RootObject();
+		return fo ? fo->GetChildCount() : 0;
+	}
+	if (!item) return 1;    // the "Profiles" root folder
+	if ([(NSValue*)item pointerValue] == kProfilesRoot) { vProfile* p = c->Profiles(); return p ? (NSInteger)p->size() : 0; }
+	return 0;               // a profile leaf
 }
 - (BOOL)outlineView:(NSOutlineView*)ov isItemExpandable:(id)item {
-	FileObject* fo = (FileObject*)[(NSValue*)item pointerValue];
-	return fo && fo->isDir();
+	FTPWindowController* c = self.ctrl;
+	if (c->RootObject()) { FileObject* fo = (FileObject*)[(NSValue*)item pointerValue]; return fo && fo->isDir(); }
+	return ([(NSValue*)item pointerValue] == kProfilesRoot);
 }
 - (id)outlineView:(NSOutlineView*)ov child:(NSInteger)index ofItem:(id)item {
-	FileObject* parent = item ? (FileObject*)[(NSValue*)item pointerValue] : self.ctrl->RootObject();
-	if (!parent) {  // disconnected → profiles shown as leaf rows (wrapped index)
-		return [NSValue valueWithPointer:(void*)(intptr_t)(index + 1)];
+	FTPWindowController* c = self.ctrl;
+	if (c->RootObject()) {
+		FileObject* parent = item ? (FileObject*)[(NSValue*)item pointerValue] : c->RootObject();
+		return [NSValue valueWithPointer:parent->GetChild((int)index)];
 	}
-	return [NSValue valueWithPointer:parent->GetChild((int)index)];
+	if (!item) return [NSValue valueWithPointer:kProfilesRoot];
+	return [NSValue valueWithPointer:profileItemPtr(index)];
 }
 - (id)outlineView:(NSOutlineView*)ov objectValueForTableColumn:(NSTableColumn*)col byItem:(id)item {
-	FileObject* root = self.ctrl->RootObject();
-	if (!root) {  // profile list
-		vProfile* p = self.ctrl->Profiles();
-		intptr_t idx = (intptr_t)[(NSValue*)item pointerValue] - 1;
-		if (p && idx >= 0 && (size_t)idx < p->size())
-			return [NSString stringWithUTF8String:p->at(idx)->GetName()];
-		return @"";
+	FTPWindowController* c = self.ctrl;
+	if (c->RootObject()) {
+		FileObject* fo = (FileObject*)[(NSValue*)item pointerValue];
+		return fo ? nsutf8(fo->GetName()) : @"";
 	}
-	FileObject* fo = (FileObject*)[(NSValue*)item pointerValue];
-	return fo ? [NSString stringWithUTF8String:fo->GetName()] : @"";
+	void* p = [(NSValue*)item pointerValue];
+	if (p == kProfilesRoot) return @"Profiles";
+	vProfile* pr = c->Profiles(); NSInteger idx = profileItemIndex(p);
+	if (pr && idx >= 0 && idx < (NSInteger)pr->size()) return nsutf8(pr->at(idx)->GetName());
+	return @"";
+}
+// Icon + name per row (folder for "Profiles"/dirs, globe for profiles, file icon).
+- (NSView*)outlineView:(NSOutlineView*)ov viewForTableColumn:(NSTableColumn*)col item:(id)item {
+	NSTableCellView* cell = [ov makeViewWithIdentifier:@"NppFTPCell" owner:self];
+	if (!cell) {
+		cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, 240, 18)];
+		cell.identifier = @"NppFTPCell";
+		NSImageView* iv = [[NSImageView alloc] initWithFrame:NSMakeRect(2, 1, 16, 16)];
+		[cell addSubview:iv]; cell.imageView = iv;
+		NSTextField* tf = [NSTextField labelWithString:@""];
+		tf.frame = NSMakeRect(22, 0, 216, 17); tf.font = [NSFont systemFontOfSize:12];
+		tf.autoresizingMask = NSViewWidthSizable; tf.lineBreakMode = NSLineBreakByTruncatingTail;
+		[cell addSubview:tf]; cell.textField = tf;
+	}
+	NSString* name = @""; NSImage* icon = nil;
+	FTPWindowController* c = self.ctrl;
+	if (c->RootObject()) {                       // connected remote tree
+		FileObject* fo = (FileObject*)[(NSValue*)item pointerValue];
+		name = fo ? nsutf8(fo->GetName()) : @"";
+		icon = (fo && fo->isDir()) ? [NSImage imageNamed:NSImageNameFolder]
+		                           : [[NSWorkspace sharedWorkspace] iconForFileType:name.pathExtension ?: @""];
+	} else {                                     // disconnected profile tree
+		void* p = [(NSValue*)item pointerValue];
+		if (p == kProfilesRoot) { name = @"Profiles"; icon = [NSImage imageNamed:NSImageNameFolder]; }
+		else {
+			vProfile* pr = c->Profiles(); NSInteger idx = profileItemIndex(p);
+			if (pr && idx >= 0 && idx < (NSInteger)pr->size()) name = nsutf8(pr->at(idx)->GetName());
+			icon = [NSImage imageWithSystemSymbolName:@"globe" accessibilityDescription:@"profile"]
+			       ?: [NSImage imageNamed:NSImageNameNetwork];
+		}
+	}
+	cell.textField.stringValue = name;
+	cell.imageView.image = icon;
+	return cell;
 }
 - (void)outlineViewItemWillExpand:(NSNotification*)n {
+	if (!self.ctrl->RootObject()) return;   // Profiles folder: nothing to lazy-load
 	id item = n.userInfo[@"NSObject"];
 	FileObject* fo = (FileObject*)[(NSValue*)item pointerValue];
 	if (fo) self.ctrl->OnTreeExpand(fo);
@@ -87,10 +137,17 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 	NSInteger row = ov.clickedRow;
 	if (row < 0) return;
 	id item = [ov itemAtRow:row];
-	FileObject* root = self.ctrl->RootObject();
-	if (!root) { self.ctrl->ActionConnectSelected(); return; }
-	FileObject* fo = (FileObject*)[(NSValue*)item pointerValue];
-	if (fo) self.ctrl->OnTreeActivate(fo);
+	FTPWindowController* c = self.ctrl;
+	if (c->RootObject()) {   // connected: open/expand remote item
+		FileObject* fo = (FileObject*)[(NSValue*)item pointerValue];
+		if (fo) c->OnTreeActivate(fo);
+		return;
+	}
+	// disconnected: double-click a profile → Connect (matches Win default action)
+	void* p = [(NSValue*)item pointerValue];
+	if (p == kProfilesRoot) return;
+	vProfile* pr = c->Profiles(); NSInteger idx = profileItemIndex(p);
+	if (pr && idx >= 0 && idx < (NSInteger)pr->size()) c->ActionConnectProfile(pr->at(idx));
 }
 
 // toolbar actions
@@ -100,17 +157,7 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 - (void)tbUpload:(id)s     { self.ctrl->ActionUploadCurrent(); }
 - (void)tbRefresh:(id)s    { self.ctrl->ActionRefresh(); }
 - (void)tbAbort:(id)s      { self.ctrl->ActionAbort(); }
-- (void)tbSettings:(id)sender {
-	// Present the two settings entry points (matching the Windows "Settings" split).
-	NSMenu* m = [[NSMenu alloc] init];
-	[[m addItemWithTitle:@"Profile settings…" action:@selector(tbProfileSettings:) keyEquivalent:@""] setTarget:self];
-	[[m addItemWithTitle:@"Global settings…" action:@selector(tbGlobalSettings:) keyEquivalent:@""] setTarget:self];
-	NSView* v = [sender isKindOfClass:[NSView class]] ? (NSView*)sender : nil;
-	if (v) [m popUpMenuPositioningItem:nil atLocation:NSMakePoint(0, v.bounds.size.height) inView:v];
-	else   [m popUpMenuPositioningItem:nil atLocation:[NSEvent mouseLocation] inView:nil];
-}
-- (void)tbProfileSettings:(id)s { self.ctrl->ActionProfileSettings(); }
-- (void)tbGlobalSettings:(id)s  { self.ctrl->ActionGlobalSettings(); }
+- (void)tbSettings:(id)sender { self.ctrl->ActionGlobalSettings(); }   // gear → Global settings
 - (void)tbMessages:(id)s   { self.ctrl->ActionMessagesToggle(); }
 
 // context menu — rebuilt on each right-click for the hit FileObject
@@ -120,12 +167,37 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 }
 - (void)menuNeedsUpdate:(NSMenu*)menu {
 	[menu removeAllItems];
-	FileObject* root = self.ctrl->RootObject();
-	if (!root) return;   // disconnected: no remote operations
+	FTPWindowController* c = self.ctrl;
 	NSInteger row = self.outline.clickedRow;
+
+	if (!c->RootObject()) {
+		// ── disconnected: profile-tree menus ─────────────────────────────────
+		void* p = (row >= 0) ? [(NSValue*)[self.outline itemAtRow:row] pointerValue] : kProfilesRoot;
+		if (p == kProfilesRoot) {                 // the "Profiles" root folder
+			c->SetContextProfile(nullptr);
+			[self addItem:menu title:@"Create new Profile" sel:@selector(ctxCreateProfile:)];
+			return;
+		}
+		vProfile* pr = c->Profiles(); NSInteger idx = profileItemIndex(p);
+		FTPProfile* prof = (pr && idx >= 0 && idx < (NSInteger)pr->size()) ? pr->at(idx) : nullptr;
+		c->SetContextProfile(prof);
+		NSMenuItem* connect = [self addItem:menu title:@"Connect" sel:@selector(ctxConnectProfile:)];
+		connect.attributedTitle = [[NSAttributedString alloc] initWithString:@"Connect"
+			attributes:@{NSFontAttributeName:[NSFont boldSystemFontOfSize:[NSFont systemFontSize]]}];
+		[self addItem:menu title:@"Edit Profile" sel:@selector(ctxEditProfile:)];
+		[menu addItem:[NSMenuItem separatorItem]];
+		[self addItem:menu title:@"Rename Profile" sel:@selector(ctxRenameProfile:)];
+		[self addItem:menu title:@"Delete Profile" sel:@selector(ctxDeleteProfile:)];
+		[menu addItem:[NSMenuItem separatorItem]];
+		[self addItem:menu title:@"Copy Profile" sel:@selector(ctxCopyProfile:)];
+		return;
+	}
+
+	// ── connected: remote file/dir operations ────────────────────────────────
+	FileObject* root = c->RootObject();
 	FileObject* fo = (row >= 0) ? (FileObject*)[(NSValue*)[self.outline itemAtRow:row] pointerValue] : root;
 	if (!fo) fo = root;
-	self.ctrl->SetContextTarget(fo);
+	c->SetContextTarget(fo);
 	if (fo->isDir()) {
 		[self addItem:menu title:@"Refresh" sel:@selector(ctxRefresh:)];
 		[self addItem:menu title:@"Upload file here…" sel:@selector(ctxUpload:)];
@@ -140,6 +212,12 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 	[self addItem:menu title:@"Delete" sel:@selector(ctxDelete:)];
 	[self addItem:menu title:@"Permissions…" sel:@selector(ctxChmod:)];
 }
+- (void)ctxCreateProfile:(id)s  { self.ctrl->ActionCreateProfile(); }
+- (void)ctxConnectProfile:(id)s { self.ctrl->ActionConnectContextProfile(); }
+- (void)ctxEditProfile:(id)s    { self.ctrl->ActionEditContextProfile(); }
+- (void)ctxRenameProfile:(id)s  { self.ctrl->ActionRenameContextProfile(); }
+- (void)ctxDeleteProfile:(id)s  { self.ctrl->ActionDeleteContextProfile(); }
+- (void)ctxCopyProfile:(id)s    { self.ctrl->ActionCopyContextProfile(); }
 - (void)ctxRefresh:(id)s      { self.ctrl->ActionRefreshDir(); }
 - (void)ctxUpload:(id)s       { self.ctrl->ActionUploadTo(); }
 - (void)ctxMkdir:(id)s        { self.ctrl->ActionMkDir(); }
@@ -166,7 +244,7 @@ FTPWindowController::FTPWindowController(const NppData* npp)
 	: m_npp(npp), m_session(nullptr), m_profiles(nullptr), m_settings(nullptr),
 	  m_panelView(nullptr), m_outline(nullptr), m_queueTable(nullptr),
 	  m_outputView(nullptr), m_bridge(nullptr), m_toolbar(nullptr), m_panelHandle(nullptr),
-	  m_selected(nullptr), m_visible(false) {}
+	  m_selected(nullptr), m_contextProfile(nullptr), m_visible(false) {}
 
 FTPWindowController::~FTPWindowController() {}
 
@@ -290,7 +368,14 @@ void* FTPWindowController::GetHWND() { return (void*)(Notifier*)this; }
 int FTPWindowController::OnActivateLocalFile(const char*) { return 0; }
 
 void FTPWindowController::RebuildTree() {
-	@autoreleasepool { if (m_outline) [(__bridge NSOutlineView*)m_outline reloadData]; }
+	@autoreleasepool {
+		NSOutlineView* ov = (__bridge NSOutlineView*)m_outline;
+		if (ov) {
+			[ov reloadData];
+			// Disconnected: show the "Profiles" folder expanded by default.
+			if (!RootObject()) [ov expandItem:[NSValue valueWithPointer:kProfilesRoot]];
+		}
+	}
 	UpdateToolbarState();
 }
 
@@ -556,13 +641,19 @@ int FTPWindowController::MessageBox(void*, const char* text, const char* caption
 
 // ── actions ──────────────────────────────────────────────────────────────────
 void FTPWindowController::ActionConnectSelected() {
-	if (!m_session || m_profiles->empty()) return;
+	if (!m_session || !m_profiles || m_profiles->empty()) return;
 	@autoreleasepool {
 		NSOutlineView* ov = (__bridge NSOutlineView*)m_outline;
-		NSInteger row = ov.selectedRow >= 0 ? ov.selectedRow : 0;
-		if ((size_t)row >= m_profiles->size()) row = 0;
-		m_session->StartSession(m_profiles->at(row));
-		m_session->Connect();
+		NSInteger row = ov.selectedRow;
+		// Connect the selected profile in the tree; fall back to the first one.
+		if (row >= 0) {
+			void* p = [(NSValue*)[ov itemAtRow:row] pointerValue];
+			if (p != kProfilesRoot) {
+				NSInteger idx = profileItemIndex(p);
+				if (idx >= 0 && idx < (NSInteger)m_profiles->size()) { ActionConnectProfile(m_profiles->at(idx)); return; }
+			}
+		}
+		ActionConnectProfile(m_profiles->at(0));
 	}
 }
 void FTPWindowController::ActionDisconnect() { if (m_session) m_session->TerminateSession(); RebuildTree(); }
@@ -582,12 +673,62 @@ void FTPWindowController::ActionUploadCurrent() {
 	hostMsg(NPPM_GETFULLCURRENTPATH, sizeof(path), (intptr_t)path);
 	// Upload-on-demand wiring (cache mapping) is completed with the dialogs.
 }
-void FTPWindowController::ActionProfileSettings() {
-	NppFTP_ShowProfileDialog(m_profiles, m_settings);
-	RebuildTree();   // profile list may have changed
-}
 void FTPWindowController::ActionGlobalSettings() {
 	NppFTP_ShowGlobalSettings(m_settings);
+}
+
+// ── profile-tree actions (disconnected panel) ────────────────────────────────
+void FTPWindowController::ActionCreateProfile() {
+	if (!m_profiles || !m_settings) return;
+	FTPProfile* p = new FTPProfile("New profile");
+	p->SetCacheParent(m_settings->GetGlobalCache());
+	m_profiles->push_back(p); p->AddRef();
+	RebuildTree();
+	NppFTP_ShowProfileSettings(p);   // Windows opens the editor right after creating
+	NppFTP_SaveSettings();
+	RebuildTree();
+}
+void FTPWindowController::ActionConnectProfile(FTPProfile* p) {
+	if (!m_session || !p) return;
+	m_session->StartSession(p);
+	m_session->Connect();
+}
+void FTPWindowController::ActionConnectContextProfile() { ActionConnectProfile(m_contextProfile); }
+void FTPWindowController::ActionEditContextProfile() {
+	if (!m_contextProfile) return;
+	NppFTP_ShowProfileSettings(m_contextProfile);   // saves on close
+	RebuildTree();
+}
+void FTPWindowController::ActionRenameContextProfile() {
+	if (!m_contextProfile) return;
+	std::string name;
+	if (PromptInput(nullptr, "Rename profile", "New name:", m_contextProfile->GetName(), false, name) != 1 || name.empty()) return;
+	m_contextProfile->SetName(name.c_str());
+	NppFTP_SaveSettings();
+	RebuildTree();
+}
+void FTPWindowController::ActionDeleteContextProfile() {
+	if (!m_contextProfile || !m_profiles) return;
+	std::string msg = std::string("Delete profile \"") + m_contextProfile->GetName() + "\"?";
+	if (MessageBox(nullptr, msg.c_str(), "Confirm delete", MB_YESNO) != IDYES) return;
+	for (size_t i = 0; i < m_profiles->size(); i++)
+		if (m_profiles->at(i) == m_contextProfile) {
+			FTPProfile* p = m_profiles->at(i);
+			m_profiles->erase(m_profiles->begin() + i); p->Release();
+			break;
+		}
+	m_contextProfile = nullptr;
+	NppFTP_SaveSettings();
+	RebuildTree();
+}
+void FTPWindowController::ActionCopyContextProfile() {
+	if (!m_contextProfile || !m_profiles || !m_settings) return;
+	std::string name = std::string(m_contextProfile->GetName()) + " copy";
+	FTPProfile* p = new FTPProfile(name.c_str(), m_contextProfile);
+	p->SetCacheParent(m_settings->GetGlobalCache());
+	m_profiles->push_back(p); p->AddRef();
+	NppFTP_SaveSettings();
+	RebuildTree();
 }
 
 // ── context-menu file operations ─────────────────────────────────────────────

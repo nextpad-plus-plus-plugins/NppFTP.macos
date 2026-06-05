@@ -58,11 +58,20 @@ public:
 	void  ActionAbort();
 	void  ActionDownloadSelected();
 	void  ActionUploadCurrent();
-	void  ActionProfileSettings();
 	void  ActionGlobalSettings();
 	void  ActionMessagesToggle();
 	void  OnTreeActivate(FileObject* fo);     // double-click on a remote item
 	void  OnTreeExpand(FileObject* fo);       // lazy-load a remote directory
+
+	// ── profile-tree actions (disconnected panel; context = SetContextProfile) ─
+	void  SetContextProfile(FTPProfile* p) { m_contextProfile = p; }
+	void  ActionCreateProfile();
+	void  ActionConnectProfile(FTPProfile* p);
+	void  ActionConnectContextProfile();
+	void  ActionEditContextProfile();
+	void  ActionRenameContextProfile();
+	void  ActionDeleteContextProfile();
+	void  ActionCopyContextProfile();
 
 	// ── context-menu file operations (target = SetContextTarget) ────────────
 	void  SetContextTarget(FileObject* fo) { m_selected = fo; }
@@ -109,6 +118,7 @@ private:
 	void*           m_toolbar;      // NSView* holding the toolbar buttons (tag 1 = needs connection)
 	void*           m_panelHandle;  // host panel handle from NPPM_DMM_REGISTERPANEL
 	FileObject*     m_selected;     // currently-selected remote object
+	FTPProfile*     m_contextProfile;  // right-clicked profile (disconnected tree)
 	bool            m_visible;
 	std::vector<ActiveOp> m_activeOps;   // in-flight transfer queue
 };
