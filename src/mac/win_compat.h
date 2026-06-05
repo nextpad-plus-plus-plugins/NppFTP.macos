@@ -69,7 +69,11 @@
 #endif
 
 // ── basic integer / boolean types ───────────────────────────────────────────
+// In ObjC(++) translation units BOOL is already defined (objc/objc.h); only
+// declare it for pure C/C++ engine TUs to avoid a typedef conflict.
+#if !defined(__OBJC__) && !defined(OBJC_BOOL_DEFINED)
 typedef int                 BOOL;
+#endif
 #ifndef TRUE
   #define TRUE  1
 #endif
@@ -443,7 +447,12 @@ static inline BOOL    DestroyWindow(HWND) { return TRUE; }
 #define DefWindowProc(h,m,w,l)       ((intptr_t)0)
 static inline LONG_PTR SetWindowLongPtr(HWND, int, LONG_PTR) { return 0; }
 static inline LONG_PTR GetWindowLongPtr(HWND, int) { return 0; }
+// The host plugin header (NppPluginInterfaceMac.h) defines SendMessage as a
+// macro routing to the host. When that's in scope (UI translation units), use
+// it; otherwise (engine TUs) the async-window path needs this no-op stub.
+#ifndef SendMessage
 static inline intptr_t SendMessage(HWND, UINT, WPARAM, LPARAM) { return 0; }
+#endif
 static inline int      WSAAsyncSelect(SOCKET, HWND, UINT, long) { return SOCKET_ERROR; }
 static inline HANDLE   WSAAsyncGetHostByAddr(HWND, UINT, const char*, int, int, char*, int) { return NULL; }
 static inline HANDLE   WSAAsyncGetHostByName(HWND, UINT, const char*, char*, int) { return NULL; }
