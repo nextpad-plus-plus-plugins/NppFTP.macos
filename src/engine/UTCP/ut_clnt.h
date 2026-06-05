@@ -103,8 +103,9 @@ public:
         tv.tv_sec = secs;
         tv.tv_usec = uSecs;
 
-        // Wait up to the specified time to see if data is avail
-        if( select(-1,&readSet,NULL,NULL,&tv)!= 1)
+        // Wait up to the specified time to see if data is avail.
+        // BSD/macOS: select() needs nfds = maxfd+1 (Winsock ignores it).
+        if( select(s+1,&readSet,NULL,NULL,&tv)!= 1)
             return UTE_ERROR;
 
         return UTE_SUCCESS;

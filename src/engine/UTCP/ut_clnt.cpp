@@ -165,7 +165,9 @@ int CUT_WSClient::Connect(unsigned int port, LPCSTR address, long timeout, int f
         SetBlockingMode(CUT_NONBLOCKING);
 
     if( connect(m_socket,(LPSOCKADDR)&m_sockAddr,sizeof(m_sockAddr))==SOCKET_ERROR){
-        if(WSAGetLastError() == WSAEWOULDBLOCK ) {
+        // macOS/BSD: a non-blocking connect() reports EINPROGRESS, not
+        // WSAEWOULDBLOCK as on Winsock. Accept both.
+        if(WSAGetLastError() == WSAEWOULDBLOCK || WSAGetLastError() == EINPROGRESS ) {
             if(timeout >= 0) {
                 if(WaitForSend(timeout, 0) != CUT_SUCCESS) {
                     SocketClose(m_socket);
@@ -515,7 +517,7 @@ int CUT_WSClient::WaitForAccept(long secs){
     FD_SET(m_serverSocket,&readSet);
 
     //wait up to the specified time to see if data is avail
-    if( select(-1,&readSet,NULL,NULL,&tv)!= 1){
+    if( select(m_serverSocket+1,&readSet,NULL,NULL,&tv)!= 1){
         return OnError(UTE_ERROR);
     }
 
@@ -1089,7 +1091,7 @@ int CUT_WSClient::WaitForSend(long secs,long uSecs){
     FD_SET(m_socket,&writeSet);
 
     //wait up to the specified time to see if data is avail
-    if( select(-1,NULL,&writeSet,NULL,&tv)!= 1){
+    if( select(m_socket+1,NULL,&writeSet,NULL,&tv)!= 1){
         return OnError(UTE_ERROR);
     }
     return OnError(UTE_SUCCESS);
@@ -1924,7 +1926,7 @@ BOOL CUT_WSClient::IsConnected(){
 
     FD_SET(m_socket,&readSet);
 
-    rt1 = select(-1,&readSet,NULL,NULL,&tv);
+    rt1 = select(m_socket+1,&readSet,NULL,NULL,&tv);
 
     if(rt1 == SOCKET_ERROR) {
         int err = WSAGetLastError();
