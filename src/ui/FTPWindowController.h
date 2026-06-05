@@ -82,6 +82,11 @@ public:
 	FileObject* RootObject();
 	void  AppendOutput(int type, const char* msg);   // append to the Messages view
 
+	// transfer-queue model (one row per in-flight operation, Add→Remove)
+	struct ActiveOp { QueueOperation* op; std::string action; std::string file; float progress; };
+	size_t           QueueCount()        { return m_activeOps.size(); }
+	const ActiveOp*  QueueAt(size_t i)   { return i < m_activeOps.size() ? &m_activeOps[i] : nullptr; }
+
 private:
 	void  RebuildTree();
 	void  RefreshQueue();
@@ -103,6 +108,7 @@ private:
 	void*           m_panelHandle;  // host panel handle from NPPM_DMM_REGISTERPANEL
 	FileObject*     m_selected;     // currently-selected remote object
 	bool            m_visible;
+	std::vector<ActiveOp> m_activeOps;   // in-flight transfer queue
 };
 
 #endif // NPPFTP_FTPWINDOWCONTROLLER_H

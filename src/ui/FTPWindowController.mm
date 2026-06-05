@@ -10,6 +10,22 @@
 #include "FTPFile.h"
 #include "PathUtils.h"
 #include "Output.h"
+#include <zlib.h>
+#include <libssh/libssh.h>
+#include <openssl/opensslv.h>
+
+// Tiny target for the About box's buttons (Close / Visit site).
+@interface NppFTPAboutHelper : NSObject
+@property (assign) NSWindow* window;
++ (instancetype)shared;
+- (void)visit:(id)s;
+- (void)closeAbout:(id)s;
+@end
+@implementation NppFTPAboutHelper
++ (instancetype)shared { static NppFTPAboutHelper* s; if (!s) s = [[NppFTPAboutHelper alloc] init]; return s; }
+- (void)visit:(id)s { [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://github.com/nextpad-plus-plus/NppFTP"]]; }
+- (void)closeAbout:(id)s { [NSApp stopModal]; [self.window orderOut:nil]; }
+@end
 
 extern "C" NppData* NppFTP_HostData();
 extern "C" void NppFTP_ShowProfileDialog(vProfile* profiles, FTPSettings* settings);
@@ -130,9 +146,15 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 - (void)ctxDelete:(id)s       { self.ctrl->ActionDelete(); }
 - (void)ctxChmod:(id)s        { self.ctrl->ActionChmod(); }
 
-// queue table (one row per active operation — minimal columns)
-- (NSInteger)numberOfRowsInTableView:(NSTableView*)t { return 0; }
-- (id)tableView:(NSTableView*)t objectValueForTableColumn:(NSTableColumn*)c row:(NSInteger)r { return @""; }
+// queue table (one row per in-flight operation)
+- (NSInteger)numberOfRowsInTableView:(NSTableView*)t { return (NSInteger)self.ctrl->QueueCount(); }
+- (id)tableView:(NSTableView*)t objectValueForTableColumn:(NSTableColumn*)c row:(NSInteger)r {
+	const FTPWindowController::ActiveOp* a = self.ctrl->QueueAt((size_t)r);
+	if (!a) return @"";
+	if ([c.identifier isEqual:@"Action"]) return [NSString stringWithUTF8String:a->action.c_str()];
+	if ([c.identifier isEqual:@"Progress"]) return (a->progress > 0.0f) ? [NSString stringWithFormat:@"%.0f%%", a->progress] : @"";
+	return [NSString stringWithUTF8String:a->file.c_str()];
+}
 @end
 
 // ─────────────────────────── controller impl ───────────────────────────────
@@ -277,7 +299,37 @@ void FTPWindowController::Notify(int message, int code, QueueOperation* op) {
 		op->AckNotification();
 	});
 }
-void FTPWindowController::ClearPending(QueueOperation*) {}
+void FTPWindowController::ClearPending(QueueOperation* op) {
+	if (!op) return;
+	void (^drop)(void) = ^{
+		for (size_t i = 0; i < m_activeOps.size(); i++) if (m_activeOps[i].op == op) { m_activeOps.erase(m_activeOps.begin()+i); break; }
+		RefreshQueue();
+	};
+	if ([NSThread isMainThread]) drop(); else dispatch_async(dispatch_get_main_queue(), drop);
+}
+
+// Captures a human label (verb + file) for a queue op, for the transfer list.
+static void describeOp(QueueOperation* op, std::string& action, std::string& file) {
+	action = "Operation"; file = "";
+	switch (op->GetType()) {
+		case QueueOperation::QueueTypeConnect:    action = "Connect"; break;
+		case QueueOperation::QueueTypeDisconnect: action = "Disconnect"; break;
+		case QueueOperation::QueueTypeDownload:
+		case QueueOperation::QueueTypeDownloadHandle:
+			action = "Download"; file = ((QueueDownload*)op)->GetExternalPath() ?: ""; break;
+		case QueueOperation::QueueTypeUpload:
+			action = "Upload"; { const char* p = ((QueueUpload*)op)->GetExternalPath(); file = p ? p : ""; } break;
+		case QueueOperation::QueueTypeDirectoryGet:
+			action = "List"; file = ((QueueGetDir*)op)->GetDirPath() ?: ""; break;
+		case QueueOperation::QueueTypeDirectoryCreate: action = "Make dir"; break;
+		case QueueOperation::QueueTypeDirectoryRemove: action = "Remove dir"; break;
+		case QueueOperation::QueueTypeFileCreate:      action = "Create file"; break;
+		case QueueOperation::QueueTypeFileDelete:      action = "Delete"; break;
+		case QueueOperation::QueueTypeFileRename:      action = "Rename"; break;
+		case QueueOperation::QueueTypeFileChmod:       action = "Chmod"; break;
+		default: break;
+	}
+}
 
 // Ported from FTPWindow::OnEvent — dispatches a completed queue operation to the
 // matching GUI update (populate tree on connect/list, open downloaded file, etc.).
@@ -287,8 +339,24 @@ void FTPWindowController::HandleNotification(int message, int code, QueueOperati
 	bool isStart = (message == (int)NotifyMessageStart);
 	bool isEnd   = (message == (int)NotifyMessageEnd);
 
-	// Add/Remove/Progress only affect the transfer-queue view.
-	if (!isStart && !isEnd) { RefreshQueue(); return; }
+	// Maintain the in-flight transfer list (op is alive between Add and Remove —
+	// QueueEventRemove blocks on ack before the queue deletes it).
+	if (message == (int)NotifyMessageAdd) {
+		ActiveOp a; a.op = op; a.progress = 0.0f; describeOp(op, a.action, a.file);
+		m_activeOps.push_back(a);
+		RefreshQueue(); return;
+	}
+	if (message == (int)NotifyMessageRemove) {
+		for (size_t i = 0; i < m_activeOps.size(); i++) if (m_activeOps[i].op == op) { m_activeOps.erase(m_activeOps.begin()+i); break; }
+		RefreshQueue(); return;
+	}
+	if (message == (int)NotifyMessageProgress) {
+		for (auto& a : m_activeOps) if (a.op == op) { a.progress = op->GetProgress(); break; }
+		RefreshQueue(); return;
+	}
+	if (isEnd) {  // clear progress; the matching Remove will drop the row
+		for (auto& a : m_activeOps) if (a.op == op) { a.progress = 100.0f; break; }
+	}
 
 	int   queueResult = op->GetResult();
 	void* queueData   = op->GetData();
@@ -615,10 +683,50 @@ void NppFTP_AppendOutput(FTPWindowController* c, int type, const char* msg) {
 
 extern "C" void cmdAbout() {
 	@autoreleasepool {
-		NSAlert* a = [[NSAlert alloc] init];
-		a.messageText = @"NppFTP";
-		a.informativeText = @"FTP/FTPS/SFTP client for Nextpad++.\n\nmacOS port of NppFTP (Harry / ashkulz).\nGPL v3.";
-		[a addButtonWithTitle:@"OK"];
-		[a runModal];
+		NSWindow* w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,440,330)
+			styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable) backing:NSBackingStoreBuffered defer:NO];
+		w.title = @"About NppFTP";
+		NSView* v = w.contentView;
+
+		NSString* msg =
+			@"NppFTP — macOS port (Nextpad++), version 1.0.0\n"
+			 "Based on NppFTP 0.30.22, Copyright 2010-2025\n"
+			 "Created by Harry; maintained by Ashish Kulkarni and Christian Grasser.\n\n"
+			 "Press “Show NppFTP Window” to get started. Enjoy transferring your "
+			 "files from your favourite editor! =)\n\n"
+			 "NppFTP works because of the effort put in the following libraries/projects:\n"
+			 "  • Ultimate TCP/IP 4.2 (FTP/FTPS engine)\n"
+			 "  • libssh (SFTP)\n"
+			 "  • OpenSSL (TLS)\n"
+			 "  • TinyXML 2.6.2\n"
+			 "  • zlib";
+		NSTextView* tv = [[NSTextView alloc] initWithFrame:NSMakeRect(12, 92, 416, 226)];
+		tv.string = msg; tv.editable = NO; tv.drawsBackground = NO;
+		tv.font = [NSFont systemFontOfSize:11];
+		NSScrollView* sc = [[NSScrollView alloc] initWithFrame:NSMakeRect(12, 92, 416, 226)];
+		sc.documentView = tv; sc.hasVerticalScroller = YES; sc.drawsBackground = NO;
+		[v addSubview:sc];
+
+		NSString* zlibV = [NSString stringWithUTF8String:zlibVersion()];
+		NSString* sshV  = [NSString stringWithUTF8String:ssh_version(0) ?: "libssh"];
+		NSString* sslV  = [NSString stringWithUTF8String:OPENSSL_VERSION_TEXT];
+		NSString* vers = [NSString stringWithFormat:@"zlib %@      %@      %@", zlibV, sshV, sslV];
+		NSTextField* vl = [NSTextField labelWithString:vers];
+		vl.frame = NSMakeRect(12, 56, 416, 16); vl.font = [NSFont systemFontOfSize:10];
+		vl.textColor = [NSColor secondaryLabelColor];
+		[v addSubview:vl];
+
+		NSButton* visit = [NSButton buttonWithTitle:@"Visit NppFTP site"
+			target:[NppFTPAboutHelper shared] action:@selector(visit:)];
+		visit.frame = NSMakeRect(12, 12, 150, 28); visit.bezelStyle = NSBezelStyleRounded;
+		[v addSubview:visit];
+
+		NSButton* close = [NSButton buttonWithTitle:@"Close" target:[NppFTPAboutHelper shared] action:@selector(closeAbout:)];
+		close.frame = NSMakeRect(340, 12, 88, 28); close.bezelStyle = NSBezelStyleRounded; close.keyEquivalent = @"\r";
+		[v addSubview:close];
+		[NppFTPAboutHelper shared].window = w;
+
+		[w center];
+		[NSApp runModalForWindow:w];
 	}
 }

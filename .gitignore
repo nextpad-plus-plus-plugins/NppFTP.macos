@@ -9,3 +9,7 @@ build-*/
 # Headers ARE tracked; the .a files are produced by the deps build.
 deps/openssl/lib/*.a
 deps/libssh/lib/*.a
+
+# arch-slice backups from universal lipo merge
+*.a.arm64
+*.a.x86_64
