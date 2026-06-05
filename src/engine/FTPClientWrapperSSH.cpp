@@ -184,7 +184,8 @@ int FTPClientWrapperSSH::GetDir(const char * path, FTPFile** files) {
 int FTPClientWrapperSSH::Cwd(const char * path) {
 	sftp_dir dir = sftp_opendir(m_sftpsession, path);
 	if(!dir) {
-		OutErr("[SFTP] Cannot Cwd to %s(%s)\n", path, ssh_get_error(m_sshsession));
+		const char* err = m_sshsession ? ssh_get_error(m_sshsession) : NULL;   // NULL during teardown
+		OutErr("[SFTP] Cannot Cwd to %s(%s)\n", path ? path : "", err ? err : "");
 		return OnReturn(-1);
 	}
 

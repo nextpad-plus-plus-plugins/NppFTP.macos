@@ -35,6 +35,7 @@ class CocoaOutput : public Output {
 public:
 	FTPWindowController* controller = nullptr;
 	int OutVA(Output_Type type, const TCHAR* message, va_list vaList) override {
+		if (!message) return 0;                 // never crash the logger on a NULL format
 		char buf[4096];
 		std::string fmt(message);
 		size_t pos = 0;

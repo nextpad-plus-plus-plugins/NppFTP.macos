@@ -125,6 +125,7 @@ private:
 	void*           m_bridge;       // ObjC data-source/delegate bridge
 	void*           m_toolbar;      // NSView* holding the toolbar buttons (tag 1 = needs connection)
 	void*           m_panelHandle;  // host panel handle from NPPM_DMM_REGISTERPANEL
+	FileObject*     m_rootObj;      // cached remote root (set once on connect; NO network I/O)
 	FileObject*     m_selected;     // currently-selected remote object
 	void*           m_profileTree;     // ProfileNode* root (disconnected tree)
 	bool            m_treeConnectedMode;  // tracks the outline's current item type

@@ -312,7 +312,7 @@ FTPWindowController::FTPWindowController(const NppData* npp)
 	: m_npp(npp), m_session(nullptr), m_profiles(nullptr), m_settings(nullptr),
 	  m_panelView(nullptr), m_outline(nullptr), m_queueTable(nullptr),
 	  m_outputView(nullptr), m_bridge(nullptr), m_toolbar(nullptr), m_panelHandle(nullptr),
-	  m_selected(nullptr), m_profileTree(nullptr), m_treeConnectedMode(false),
+	  m_rootObj(nullptr), m_selected(nullptr), m_profileTree(nullptr), m_treeConnectedMode(false),
 	  m_pendingTerminate(false),
 	  m_contextProfile(nullptr), m_contextIsFolder(false), m_contextIsRoot(false),
 	  m_clipProfile(nullptr), m_clipIsCut(false), m_visible(false) {}
@@ -320,7 +320,10 @@ FTPWindowController::FTPWindowController(const NppData* npp)
 FTPWindowController::~FTPWindowController() {}
 
 FileObject* FTPWindowController::RootObject() {
-	return (m_session && m_session->IsConnected()) ? m_session->GetRootObject() : nullptr;
+	// CHEAP cached accessor — never touch the network here. (FTPSession::GetRootObject
+	// runs Cwd/Pwd commands and rebuilds the tree; it must be called exactly once on
+	// connect, NOT on every NSOutlineView query / RebuildTree.)
+	return (m_session && m_session->IsConnected()) ? m_rootObj : nullptr;
 }
 
 int FTPWindowController::Create(void*, void*, int, int) {
@@ -663,7 +666,9 @@ void FTPWindowController::HandleNotification(int message, int code, QueueOperati
 void FTPWindowController::OnConnect(int code) {
 	m_selected = nullptr;
 	if (code != 0) { RebuildTree(); return; }   // automated connect: no auto-list
+	// THE one and only GetRootObject() call (runs Cwd/Pwd + builds the root tree).
 	FileObject* root = m_session ? m_session->GetRootObject() : nullptr;
+	m_rootObj = root;                            // cache it for the cheap RootObject()
 	RebuildTree();
 	if (!root) return;
 	// Walk to the deepest pre-seeded child (the profile's initial remote dir)
@@ -675,7 +680,8 @@ void FTPWindowController::OnConnect(int code) {
 
 void FTPWindowController::OnDisconnect() {
 	m_selected = nullptr;
-	RebuildTree();   // RootObject() is now null → outline falls back to the profile list
+	m_rootObj  = nullptr;   // the session is tearing down its root tree; drop our ref
+	RebuildTree();          // RootObject() is now null → outline falls back to profiles
 }
 
 void FTPWindowController::OnDirectoryRefresh(FileObject* parent, FTPFile* files, int count) {
