@@ -15,7 +15,7 @@
 #include <openssl/opensslv.h>
 
 // Tiny target for the About box's buttons (Close / Visit site).
-@interface NppFTPAboutHelper : NSObject
+@interface NppFTPAboutHelper : NSObject <NSWindowDelegate>
 @property (assign) NSWindow* window;
 + (instancetype)shared;
 - (void)visit:(id)s;
@@ -24,7 +24,8 @@
 @implementation NppFTPAboutHelper
 + (instancetype)shared { static NppFTPAboutHelper* s; if (!s) s = [[NppFTPAboutHelper alloc] init]; return s; }
 - (void)visit:(id)s { [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://github.com/nextpad-plus-plus/NppFTP"]]; }
-- (void)closeAbout:(id)s { [NSApp stopModal]; [self.window orderOut:nil]; }
+- (void)closeAbout:(id)s { [self.window close]; }   // → windowWillClose:
+- (void)windowWillClose:(NSNotification*)n { [NSApp stopModal]; }
 @end
 
 extern "C" NppData* NppFTP_HostData();
@@ -698,6 +699,8 @@ extern "C" void cmdAbout() {
 		NSWindow* w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,440,330)
 			styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable) backing:NSBackingStoreBuffered defer:NO];
 		w.title = @"About NppFTP";
+		w.releasedWhenClosed = NO;
+		w.delegate = [NppFTPAboutHelper shared];
 		NSView* v = w.contentView;
 
 		NSString* msg =

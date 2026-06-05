@@ -50,7 +50,7 @@ static NSButton* mkRadio(NSView* parent, NSString* s, CGFloat x, CGFloat y, CGFl
 static NSString* sutf8(const char* s) { return [NSString stringWithUTF8String:s ? s : ""]; }
 
 // ───────────────────────────── the dialog ──────────────────────────────────
-@interface NppFTPProfileDialog : NSObject <NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate> {
+@interface NppFTPProfileDialog : NSObject <NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSWindowDelegate> {
 	vProfile*     _profiles;
 	FTPSettings*  _settings;
 	FTPProfile*   _cur;
@@ -95,6 +95,8 @@ static NSString* sutf8(const char* s) { return [NSString stringWithUTF8String:s 
 		styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
 		backing:NSBackingStoreBuffered defer:NO];
 	self.window.title = @"Profile settings";
+	self.window.releasedWhenClosed = NO;
+	self.window.delegate = self;   // windowWillClose: ends the modal session
 	NSView* root = self.window.contentView;
 
 	// left: profiles list + buttons
@@ -483,16 +485,17 @@ static NSString* sutf8(const char* s) { return [NSString stringWithUTF8String:s 
 }
 
 // ── close ─────────────────────────────────────────────────────────────────
-- (void)closeDialog:(id)s {
-	[self commit];
+- (void)closeDialog:(id)s { [self.window close]; }   // → windowWillClose:
+- (void)windowWillClose:(NSNotification*)n {
+	if (n.object != self.window) return;
+	[self commit];              // persist on ANY close path (button or title-bar)
 	NppFTP_SaveSettings();
 	[NSApp stopModal];
-	[self.window orderOut:nil];
 }
 @end
 
 // ────────────────────────── Global settings dialog ─────────────────────────
-@interface NppFTPGlobalDialog : NSObject {
+@interface NppFTPGlobalDialog : NSObject <NSWindowDelegate> {
 	FTPSettings* _settings;
 }
 @property (strong) NSWindow* window;
@@ -509,6 +512,8 @@ static NSString* sutf8(const char* s) { return [NSString stringWithUTF8String:s 
 	self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,440,260)
 		styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable) backing:NSBackingStoreBuffered defer:NO];
 	self.window.title = @"Global settings";
+	self.window.releasedWhenClosed = NO;
+	self.window.delegate = self;
 	NSView* v = self.window.contentView;
 	mkLabel(v, @"Global cache:", 16, 224, 120);
 	self.edCache = mkEdit(v, 16, 202, 360, NO);
@@ -534,8 +539,10 @@ static NSString* sutf8(const char* s) { return [NSString stringWithUTF8String:s 
 	NSString* mp = self.edMaster.stringValue;
 	if (mp.length) { char key[8] = {0}; strncpy(key, mp.UTF8String, 8); _settings->SetEncryptionKey(key); }
 	NppFTP_SaveSettings();
-	[NSApp stopModal];
-	[self.window orderOut:nil];
+	[self.window close];   // → windowWillClose:
+}
+- (void)windowWillClose:(NSNotification*)n {
+	if (n.object == self.window) [NSApp stopModal];
 }
 @end
 
