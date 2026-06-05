@@ -180,18 +180,27 @@ int FTPWindowController::Create(void*, void*, int, int) {
 		// toolbar row
 		NSView* tb = [[NSView alloc] initWithFrame:NSMakeRect(0, 572, 320, 28)];
 		tb.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
-		struct { const char* t; SEL a; } btns[] = {
-			{"Connect", @selector(tbConnect:)}, {"Disconnect", @selector(tbDisconnect:)},
-			{"Download", @selector(tbDownload:)}, {"Upload", @selector(tbUpload:)},
-			{"Refresh", @selector(tbRefresh:)}, {"Abort", @selector(tbAbort:)},
-			{"Settings", @selector(tbSettings:)}, {"Messages", @selector(tbMessages:)},
+		struct { const char* tip; const char* sym; SEL a; } btns[] = {
+			{"Connect",    "bolt.horizontal.circle", @selector(tbConnect:)},
+			{"Disconnect", "xmark.circle",           @selector(tbDisconnect:)},
+			{"Download",   "arrow.down.circle",      @selector(tbDownload:)},
+			{"Upload",     "arrow.up.circle",        @selector(tbUpload:)},
+			{"Refresh",    "arrow.clockwise",        @selector(tbRefresh:)},
+			{"Abort",      "stop.circle",            @selector(tbAbort:)},
+			{"Settings",   "gearshape",              @selector(tbSettings:)},
+			{"Messages",   "text.bubble",            @selector(tbMessages:)},
 		};
-		CGFloat x = 4;
+		CGFloat x = 6;
 		for (auto& b : btns) {
-			NSButton* btn = [NSButton buttonWithTitle:[NSString stringWithUTF8String:b.t] target:bridge action:b.a];
-			btn.bezelStyle = NSBezelStyleRecessed; btn.frame = NSMakeRect(x, 2, 36, 24);
-			btn.font = [NSFont systemFontOfSize:9];
-			[tb addSubview:btn]; x += 38;
+			NSButton* btn = [NSButton buttonWithTitle:@"" target:bridge action:b.a];
+			NSImage* img = [NSImage imageWithSystemSymbolName:[NSString stringWithUTF8String:b.sym]
+			                        accessibilityDescription:[NSString stringWithUTF8String:b.tip]];
+			if (img) { btn.image = img; btn.imagePosition = NSImageOnly; }
+			else     { btn.title = [NSString stringWithUTF8String:b.tip]; btn.font = [NSFont systemFontOfSize:9]; }
+			btn.bezelStyle = NSBezelStyleRegularSquare; btn.bordered = NO;
+			btn.toolTip = [NSString stringWithUTF8String:b.tip];
+			btn.frame = NSMakeRect(x, 2, 28, 24);
+			[tb addSubview:btn]; x += 30;
 		}
 		[panel addSubview:tb];
 
