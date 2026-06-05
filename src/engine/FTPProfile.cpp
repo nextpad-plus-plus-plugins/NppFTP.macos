@@ -600,6 +600,13 @@ vProfile FTPProfile::LoadProfiles(const TiXmlElement * profilesElem) {
 		FTPProfile * profile = FTPProfile::LoadProfile(child);
 		if (profile) {
 			profiles.push_back(profile);
+			profile->AddRef();	// the list owns one reference (refcount 1),
+						// matching newly-created profiles (new + AddRef).
+						// Without this a loaded profile sits at refcount 0, so a
+						// connect (AddRef->1) + disconnect (Release->0) deletes it
+						// while still in the list -> dangling ptr -> crash on the
+						// next SaveProfiles. (macOS has no ProfileObject tree to
+						// hold the baseline ref that Windows relies on.)
 		}
 	}
 
