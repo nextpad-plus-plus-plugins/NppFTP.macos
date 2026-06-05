@@ -441,29 +441,39 @@ int FTPWindowController::OnActivateLocalFile(const char*) { return 0; }
 
 void FTPWindowController::RebuildTree() {
 	bool connected = (RootObject() != nullptr);
-	// Disconnected: rebuild the Profiles-folder tree from the saved profiles.
-	if (!connected) {
-		freeProfileTree((ProfileNode*)m_profileTree);
-		m_profileTree = buildProfileTree(m_profiles);
-	}
 	@autoreleasepool {
 		NSOutlineView* ov = (__bridge NSOutlineView*)m_outline;
+		if (!connected) {
+			// We're about to FREE + rebuild the ProfileNode tree. NSOutlineView
+			// lazily retains item pointers (for expansion state / itemAtRow:), so
+			// it would keep handing back freed ProfileNode* after the rebuild —
+			// reading node->profile from freed memory and crashing on the next
+			// click. Drop the outline's items FIRST (detach the data source →
+			// reloadData releases them), THEN free + rebuild.
+			if (ov) { id ds = ov.dataSource; ov.dataSource = nil; [ov reloadData]; ov.dataSource = ds; }
+			freeProfileTree((ProfileNode*)m_profileTree);
+			m_profileTree = buildProfileTree(m_profiles);
+		} else if (connected != m_treeConnectedMode && ov) {
+			// Just switched to connected: drop the old ProfileNode* items before
+			// the outline re-queries them as FileObject* (wrong-type cast → crash).
+			id ds = ov.dataSource; ov.dataSource = nil; [ov reloadData]; ov.dataSource = ds;
+		}
+		m_treeConnectedMode = connected;
 		if (ov) {
-			// On a connect/disconnect switch the outline still retains the OTHER
-			// mode's items (ProfileNode* vs FileObject*). Drop them first — else
-			// reloadData re-queries a stale item under the wrong cast → crash.
-			if (connected != m_treeConnectedMode) {
-				id ds = ov.dataSource;
-				ov.dataSource = nil; [ov reloadData];
-				ov.dataSource = ds;
-				m_treeConnectedMode = connected;
-			}
 			[ov reloadData];
 			if (!connected && m_profileTree)   // show "Profiles" expanded by default
 				[ov expandItem:[NSValue valueWithPointer:m_profileTree]];
 		}
 	}
 	UpdateToolbarState();
+}
+
+// Guard against a stale context pointer (tree freed/rebuilt under an open menu):
+// pointer-compare only (never deref p), so it's safe even if p is garbage.
+bool FTPWindowController::profileInList(FTPProfile* p) {
+	if (!p || !m_profiles) return false;
+	for (FTPProfile* x : *m_profiles) if (x == p) return true;
+	return false;
 }
 
 void FTPWindowController::UpdateToolbarState() {
@@ -849,18 +859,18 @@ void FTPWindowController::ActionCreateFolder() {
 	RebuildTree();
 }
 void FTPWindowController::ActionConnectProfile(FTPProfile* p) {
-	if (!m_session || !p) return;
+	if (!m_session || !profileInList(p)) return;   // p may be a stale node pointer
 	m_session->StartSession(p);
 	m_session->Connect();
 }
 void FTPWindowController::ActionConnectContextProfile() { ActionConnectProfile(m_contextProfile); }
 void FTPWindowController::ActionEditContextProfile() {
-	if (!m_contextProfile) return;
+	if (!profileInList(m_contextProfile)) return;
 	NppFTP_ShowProfileSettings(m_contextProfile);   // saves on close
 	RebuildTree();
 }
 void FTPWindowController::ActionRenameContextProfile() {
-	if (!m_contextProfile) return;
+	if (!profileInList(m_contextProfile)) return;
 	std::string name;
 	if (PromptInput(nullptr, "Rename profile", "New name:", m_contextProfile->GetName(), false, name) != 1 || name.empty()) return;
 	m_contextProfile->SetName(name.c_str());
@@ -868,7 +878,7 @@ void FTPWindowController::ActionRenameContextProfile() {
 	RebuildTree();
 }
 void FTPWindowController::ActionDeleteContextProfile() {
-	if (!m_contextProfile || !m_profiles) return;
+	if (!profileInList(m_contextProfile) || !m_profiles) return;
 	std::string msg = std::string("Delete profile \"") + m_contextProfile->GetName() + "\"?";
 	if (MessageBox(nullptr, msg.c_str(), "Confirm delete", MB_YESNO) != IDYES) return;
 	for (size_t i = 0; i < m_profiles->size(); i++)
@@ -924,6 +934,7 @@ void FTPWindowController::ActionCopyContext() {
 void FTPWindowController::ActionPasteInto() {
 	if (!m_profiles || !m_settings) return;
 	std::string target = m_contextFolderPath;   // paste into the right-clicked folder
+	if (m_clipProfile && !profileInList(m_clipProfile)) { m_clipProfile = nullptr; return; }   // stale
 	if (m_clipProfile) {                         // ── a profile on the clipboard ──
 		if (m_clipIsCut) {
 			m_clipProfile->SetParent(target.c_str());           // move

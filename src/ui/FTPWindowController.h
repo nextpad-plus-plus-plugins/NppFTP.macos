@@ -106,6 +106,7 @@ public:
 private:
 	void  RebuildTree();
 	void  RefreshQueue();
+	bool  profileInList(FTPProfile* p);   // validate a context profile pointer
 	void  UpdateToolbarState();   // enable/disable connection-requiring buttons
 	// engine-event handlers (ported from FTPWindow::OnConnect/OnDisconnect/OnDirectoryRefresh)
 	void  OnConnect(int code);
