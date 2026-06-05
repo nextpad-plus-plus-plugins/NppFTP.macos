@@ -1,0 +1,11 @@
+# Build output
+build/
+build-*/
+*.o
+*.dylib
+.DS_Store
+
+# Vendored static libs are large + rebuildable (see deps build notes).
+# Headers ARE tracked; the .a files are produced by the deps build.
+deps/openssl/lib/*.a
+deps/libssh/lib/*.a
