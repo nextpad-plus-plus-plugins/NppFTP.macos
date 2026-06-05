@@ -165,7 +165,7 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 FTPWindowController::FTPWindowController(const NppData* npp)
 	: m_npp(npp), m_session(nullptr), m_profiles(nullptr), m_settings(nullptr),
 	  m_panelView(nullptr), m_outline(nullptr), m_queueTable(nullptr),
-	  m_outputView(nullptr), m_bridge(nullptr), m_panelHandle(nullptr),
+	  m_outputView(nullptr), m_bridge(nullptr), m_toolbar(nullptr), m_panelHandle(nullptr),
 	  m_selected(nullptr), m_visible(false) {}
 
 FTPWindowController::~FTPWindowController() {}
@@ -184,15 +184,15 @@ int FTPWindowController::Create(void*, void*, int, int) {
 		// toolbar row
 		NSView* tb = [[NSView alloc] initWithFrame:NSMakeRect(0, 572, 320, 28)];
 		tb.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
-		struct { const char* tip; const char* sym; SEL a; } btns[] = {
-			{"Connect",    "bolt.horizontal.circle", @selector(tbConnect:)},
-			{"Disconnect", "xmark.circle",           @selector(tbDisconnect:)},
-			{"Download",   "arrow.down.circle",      @selector(tbDownload:)},
-			{"Upload",     "arrow.up.circle",        @selector(tbUpload:)},
-			{"Refresh",    "arrow.clockwise",        @selector(tbRefresh:)},
-			{"Abort",      "stop.circle",            @selector(tbAbort:)},
-			{"Settings",   "gearshape",              @selector(tbSettings:)},
-			{"Messages",   "text.bubble",            @selector(tbMessages:)},
+		struct { const char* tip; const char* sym; SEL a; bool needsConn; } btns[] = {
+			{"Connect",    "bolt.horizontal.circle", @selector(tbConnect:),    false},
+			{"Disconnect", "xmark.circle",           @selector(tbDisconnect:), true},
+			{"Download",   "arrow.down.circle",      @selector(tbDownload:),   true},
+			{"Upload",     "arrow.up.circle",        @selector(tbUpload:),     true},
+			{"Refresh",    "arrow.clockwise",        @selector(tbRefresh:),    true},
+			{"Abort",      "stop.circle",            @selector(tbAbort:),      true},
+			{"Settings",   "gearshape",              @selector(tbSettings:),   false},
+			{"Messages",   "text.bubble",            @selector(tbMessages:),   false},
 		};
 		CGFloat x = 6;
 		for (auto& b : btns) {
@@ -203,9 +203,11 @@ int FTPWindowController::Create(void*, void*, int, int) {
 			else     { btn.title = [NSString stringWithUTF8String:b.tip]; btn.font = [NSFont systemFontOfSize:9]; }
 			btn.bezelStyle = NSBezelStyleRegularSquare; btn.bordered = NO;
 			btn.toolTip = [NSString stringWithUTF8String:b.tip];
+			btn.tag = b.needsConn ? 1 : 0;   // 1 = disabled while disconnected
 			btn.frame = NSMakeRect(x, 2, 28, 24);
 			[tb addSubview:btn]; x += 30;
 		}
+		m_toolbar = (void*)CFBridgingRetain(tb);
 		[panel addSubview:tb];
 
 		// remote tree
@@ -289,6 +291,18 @@ int FTPWindowController::OnActivateLocalFile(const char*) { return 0; }
 
 void FTPWindowController::RebuildTree() {
 	@autoreleasepool { if (m_outline) [(__bridge NSOutlineView*)m_outline reloadData]; }
+	UpdateToolbarState();
+}
+
+void FTPWindowController::UpdateToolbarState() {
+	@autoreleasepool {
+		NSView* tb = (__bridge NSView*)m_toolbar;
+		if (!tb) return;
+		BOOL connected = (m_session && m_session->IsConnected());
+		for (NSView* sv in tb.subviews)
+			if ([sv isKindOfClass:[NSButton class]] && sv.tag == 1)
+				((NSButton*)sv).enabled = connected;
+	}
 }
 
 void FTPWindowController::AppendOutput(int /*type*/, const char* msg) {
@@ -556,7 +570,9 @@ void FTPWindowController::ActionRefresh() {
 	if (m_session && m_session->IsConnected()) m_session->GetDirectory("/");
 }
 void FTPWindowController::ActionAbort() {
-	if (!m_session) return;
+	// AbortTransfer/AbortOperation deref m_transferWrapper/m_mainWrapper, which
+	// only exist while connected — guard to avoid a null deref when idle.
+	if (!m_session || !m_session->IsConnected()) return;
 	m_session->AbortTransfer();
 	m_session->AbortOperation();
 }
@@ -672,7 +688,7 @@ void FTPWindowController::OnTreeExpand(FileObject* fo) {
 }
 
 void FTPWindowController::OnTreeActivate(FileObject* fo) {
-	if (!fo) return;
+	if (!fo || !m_session || !m_session->IsConnected()) return;
 	m_selected = fo;
 	if (fo->isDir()) {
 		// toggle: collapse if expanded, else list + expand

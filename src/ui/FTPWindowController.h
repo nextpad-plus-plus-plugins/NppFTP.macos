@@ -90,6 +90,7 @@ public:
 private:
 	void  RebuildTree();
 	void  RefreshQueue();
+	void  UpdateToolbarState();   // enable/disable connection-requiring buttons
 	// engine-event handlers (ported from FTPWindow::OnConnect/OnDisconnect/OnDirectoryRefresh)
 	void  OnConnect(int code);
 	void  OnDisconnect();
@@ -105,6 +106,7 @@ private:
 	void*           m_queueTable;   // NSTableView* (transfer queue)
 	void*           m_outputView;   // NSTextView* (messages)
 	void*           m_bridge;       // ObjC data-source/delegate bridge
+	void*           m_toolbar;      // NSView* holding the toolbar buttons (tag 1 = needs connection)
 	void*           m_panelHandle;  // host panel handle from NPPM_DMM_REGISTERPANEL
 	FileObject*     m_selected;     // currently-selected remote object
 	bool            m_visible;
