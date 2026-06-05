@@ -612,6 +612,12 @@ int CUT_WSClient::EnableSSL(bool enable) {
             printf("*** %s\n", ERR_error_string(errval, NULL));
         }
         SSL_CTX_set_mode(m_ctx, SSL_MODE_AUTO_RETRY);
+        // FTPS reuses the control connection's TLS session on EVERY data
+        // connection. TLS 1.3 session tickets are single-use, so the 2nd data
+        // transfer fails ("425 Cannot secure data connection"). Cap at TLS 1.2,
+        // whose session resumption is reusable across all data connections.
+        // (macOS OpenSSL 3.x defaults to 1.3; the Windows build negotiated 1.2.)
+        SSL_CTX_set_max_proto_version(m_ctx, TLS1_2_VERSION);
 
         int certRet = OnLoadCertificates(m_ctx);
         if (certRet != UTE_SUCCESS) {
@@ -660,6 +666,13 @@ int CUT_WSClient::SetSecurityMode(SSLMode mode){
 int CUT_WSClient::ConnectSSL() {
     if (m_SSLconnected)
         return UTE_SUCCESS;
+
+    // The data-connection SSL object is reused across transfers (LIST, RETR,
+    // STOR, ...). After a previous transfer it was SSL_shutdown'd; SSL_connect
+    // on a shut-down object won't perform a fresh (resuming) handshake. Reset
+    // it for reuse — SSL_clear keeps settings and does not drop the session set
+    // below, so data-channel session reuse still works on every connection.
+    SSL_clear(m_ssl);
 
     SSL_set_fd(m_ssl, m_socket);
 

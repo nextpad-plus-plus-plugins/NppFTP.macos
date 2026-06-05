@@ -78,6 +78,17 @@ int main(int argc, char** argv) {
 		printf("  [%s] %-40s %10ld  %s\n", typeStr(files[i].fileType),
 		       files[i].filePath, files[i].fileSize, files[i].mod);
 	}
+	// Download the first regular file found, to validate RETR / ReceiveFile.
+	for (int i = 0; i < count; i++) {
+		if (files[i].fileType == FTPTypeFile && files[i].fileSize > 0) {
+			const char* local = "/tmp/nppftp_dl.bin";
+			int dr = w->ReceiveFile(local, files[i].filePath);
+			struct stat st; long got = (stat(local, &st) == 0) ? (long)st.st_size : -1;
+			printf("ReceiveFile(%s) = %d, downloaded %ld bytes (expected %ld)\n",
+			       files[i].filePath, dr, got, files[i].fileSize);
+			break;
+		}
+	}
 	if (files) FTPClientWrapper::ReleaseDir(files, count);
 
 	w->Disconnect();
