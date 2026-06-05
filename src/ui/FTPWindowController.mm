@@ -21,8 +21,9 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 
 // ───────────────────────────── ObjC bridge ─────────────────────────────────
 // Data source/delegate for the remote tree + queue, and toolbar action target.
-@interface NppFTPBridge : NSObject <NSOutlineViewDataSource, NSOutlineViewDelegate, NSTableViewDataSource>
+@interface NppFTPBridge : NSObject <NSOutlineViewDataSource, NSOutlineViewDelegate, NSTableViewDataSource, NSMenuDelegate>
 @property (assign, nonatomic) FTPWindowController* ctrl;
+@property (assign, nonatomic) NSOutlineView* outline;   // for context-menu hit-testing
 @end
 
 @implementation NppFTPBridge
@@ -92,6 +93,43 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 - (void)tbGlobalSettings:(id)s  { self.ctrl->ActionGlobalSettings(); }
 - (void)tbMessages:(id)s   { self.ctrl->ActionMessagesToggle(); }
 
+// context menu — rebuilt on each right-click for the hit FileObject
+- (NSMenuItem*)addItem:(NSMenu*)m title:(NSString*)t sel:(SEL)s {
+	NSMenuItem* i = [m addItemWithTitle:t action:s keyEquivalent:@""];
+	i.target = self; return i;
+}
+- (void)menuNeedsUpdate:(NSMenu*)menu {
+	[menu removeAllItems];
+	FileObject* root = self.ctrl->RootObject();
+	if (!root) return;   // disconnected: no remote operations
+	NSInteger row = self.outline.clickedRow;
+	FileObject* fo = (row >= 0) ? (FileObject*)[(NSValue*)[self.outline itemAtRow:row] pointerValue] : root;
+	if (!fo) fo = root;
+	self.ctrl->SetContextTarget(fo);
+	if (fo->isDir()) {
+		[self addItem:menu title:@"Refresh" sel:@selector(ctxRefresh:)];
+		[self addItem:menu title:@"Upload file here…" sel:@selector(ctxUpload:)];
+		[self addItem:menu title:@"New directory…" sel:@selector(ctxMkdir:)];
+		[self addItem:menu title:@"New file…" sel:@selector(ctxMkfile:)];
+	} else {
+		[self addItem:menu title:@"Download && open" sel:@selector(ctxDownloadOpen:)];
+		[self addItem:menu title:@"Download to…" sel:@selector(ctxDownloadTo:)];
+	}
+	[menu addItem:[NSMenuItem separatorItem]];
+	[self addItem:menu title:@"Rename…" sel:@selector(ctxRename:)];
+	[self addItem:menu title:@"Delete" sel:@selector(ctxDelete:)];
+	[self addItem:menu title:@"Permissions…" sel:@selector(ctxChmod:)];
+}
+- (void)ctxRefresh:(id)s      { self.ctrl->ActionRefreshDir(); }
+- (void)ctxUpload:(id)s       { self.ctrl->ActionUploadTo(); }
+- (void)ctxMkdir:(id)s        { self.ctrl->ActionMkDir(); }
+- (void)ctxMkfile:(id)s       { self.ctrl->ActionMkFile(); }
+- (void)ctxDownloadOpen:(id)s { self.ctrl->ActionDownloadOpen(); }
+- (void)ctxDownloadTo:(id)s   { self.ctrl->ActionDownloadTo(); }
+- (void)ctxRename:(id)s       { self.ctrl->ActionRename(); }
+- (void)ctxDelete:(id)s       { self.ctrl->ActionDelete(); }
+- (void)ctxChmod:(id)s        { self.ctrl->ActionChmod(); }
+
 // queue table (one row per active operation — minimal columns)
 - (NSInteger)numberOfRowsInTableView:(NSTableView*)t { return 0; }
 - (id)tableView:(NSTableView*)t objectValueForTableColumn:(NSTableColumn*)c row:(NSInteger)r { return @""; }
@@ -146,6 +184,9 @@ int FTPWindowController::Create(void*, void*, int, int) {
 		outline.dataSource = bridge; outline.delegate = bridge;
 		outline.headerView = nil;
 		outline.target = bridge; outline.doubleAction = @selector(onOutlineDoubleClick:);
+		bridge.outline = outline;
+		NSMenu* ctx = [[NSMenu alloc] init]; ctx.delegate = bridge;
+		outline.menu = ctx;
 		treeScroll.documentView = outline;
 		[panel addSubview:treeScroll];
 		m_outline = (void*)CFBridgingRetain(outline);
@@ -433,7 +474,11 @@ void FTPWindowController::ActionDisconnect() { if (m_session) m_session->Termina
 void FTPWindowController::ActionRefresh() {
 	if (m_session && m_session->IsConnected()) m_session->GetDirectory("/");
 }
-void FTPWindowController::ActionAbort() {}
+void FTPWindowController::ActionAbort() {
+	if (!m_session) return;
+	m_session->AbortTransfer();
+	m_session->AbortOperation();
+}
 void FTPWindowController::ActionDownloadSelected() { if (m_selected) OnTreeActivate(m_selected); }
 void FTPWindowController::ActionUploadCurrent() {
 	char path[2048]; path[0] = 0;
@@ -446,6 +491,97 @@ void FTPWindowController::ActionProfileSettings() {
 }
 void FTPWindowController::ActionGlobalSettings() {
 	NppFTP_ShowGlobalSettings(m_settings);
+}
+
+// ── context-menu file operations ─────────────────────────────────────────────
+// Remote paths are POSIX-style ('/'-separated); helpers compute parent/child.
+static std::string ftpParentPath(const char* p) {
+	std::string s(p && *p ? p : "/");
+	if (s.size() > 1 && s.back() == '/') s.pop_back();
+	size_t slash = s.find_last_of('/');
+	if (slash == std::string::npos || slash == 0) return "/";
+	return s.substr(0, slash);
+}
+static std::string ftpChildPath(const char* dir, const std::string& name) {
+	std::string s(dir && *dir ? dir : "/");
+	if (s.empty() || s.back() != '/') s += '/';
+	return s + name;
+}
+
+void FTPWindowController::ActionRefreshDir() {
+	if (m_session && m_selected && m_selected->isDir())
+		m_session->GetDirectory(m_selected->GetPath());
+}
+void FTPWindowController::ActionUploadTo() {
+	if (!m_session || !m_selected || !m_selected->isDir()) return;
+	std::string dir = m_selected->GetPath();
+	@autoreleasepool {
+		NSOpenPanel* p = [NSOpenPanel openPanel];
+		p.canChooseFiles = YES; p.canChooseDirectories = NO; p.allowsMultipleSelection = NO;
+		if ([p runModal] != NSModalResponseOK) return;
+		std::string local = p.URL.path.UTF8String;
+		m_session->UploadFile(local.c_str(), dir.c_str(), true);
+		m_session->GetDirectory(dir.c_str());   // refresh after the upload completes (serial queue)
+	}
+}
+void FTPWindowController::ActionMkDir() {
+	if (!m_session || !m_selected || !m_selected->isDir()) return;
+	std::string dir = m_selected->GetPath(), name;
+	if (PromptInput(nullptr, "New directory", "Directory name:", "", false, name) != 1 || name.empty()) return;
+	m_session->MkDir(ftpChildPath(dir.c_str(), name).c_str());
+	m_session->GetDirectory(dir.c_str());
+}
+void FTPWindowController::ActionMkFile() {
+	if (!m_session || !m_selected || !m_selected->isDir()) return;
+	std::string dir = m_selected->GetPath(), name;
+	if (PromptInput(nullptr, "New file", "File name:", "", false, name) != 1 || name.empty()) return;
+	m_session->MkFile(ftpChildPath(dir.c_str(), name).c_str());
+	m_session->GetDirectory(dir.c_str());
+}
+void FTPWindowController::ActionDownloadOpen() {
+	if (m_session && m_selected && !m_selected->isDir())
+		m_session->DownloadFileCache(m_selected->GetPath());
+}
+void FTPWindowController::ActionDownloadTo() {
+	if (!m_session || !m_selected || m_selected->isDir()) return;
+	std::string remote = m_selected->GetPath();
+	@autoreleasepool {
+		NSSavePanel* p = [NSSavePanel savePanel];
+		p.nameFieldStringValue = [NSString stringWithUTF8String:m_selected->GetName()];
+		if ([p runModal] != NSModalResponseOK) return;
+		std::string local = p.URL.path.UTF8String;
+		// code != 0 → HandleNotification asks before opening (download-to-location).
+		m_session->DownloadFile(remote.c_str(), local.c_str(), false, 1);
+	}
+}
+void FTPWindowController::ActionRename() {
+	if (!m_session || !m_selected) return;
+	std::string oldpath = m_selected->GetPath();
+	std::string parent  = ftpParentPath(oldpath.c_str());
+	std::string newname;
+	if (PromptInput(nullptr, "Rename", "New name:", m_selected->GetName(), false, newname) != 1 || newname.empty()) return;
+	m_session->Rename(oldpath.c_str(), ftpChildPath(parent.c_str(), newname).c_str());
+	m_session->GetDirectory(parent.c_str());
+}
+void FTPWindowController::ActionDelete() {
+	if (!m_session || !m_selected) return;
+	std::string path = m_selected->GetPath();
+	std::string parent = ftpParentPath(path.c_str());
+	bool isDir = m_selected->isDir();
+	std::string msg = std::string("Delete ") + (isDir ? "directory " : "file ") + m_selected->GetName() + "?";
+	if (MessageBox(nullptr, msg.c_str(), "Confirm delete", MB_YESNO) != IDYES) return;
+	if (isDir) m_session->RmDir(path.c_str());
+	else       m_session->DeleteFile(path.c_str());
+	m_session->GetDirectory(parent.c_str());
+}
+void FTPWindowController::ActionChmod() {
+	if (!m_session || !m_selected) return;
+	std::string path = m_selected->GetPath();
+	std::string parent = ftpParentPath(path.c_str());
+	std::string mode;
+	if (PromptInput(nullptr, "Permissions", "Octal mode (e.g. 644):", "644", false, mode) != 1 || mode.empty()) return;
+	m_session->Chmod(path.c_str(), mode.c_str());
+	m_session->GetDirectory(parent.c_str());
 }
 void FTPWindowController::ActionMessagesToggle() {}
 

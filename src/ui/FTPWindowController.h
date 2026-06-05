@@ -64,6 +64,18 @@ public:
 	void  OnTreeActivate(FileObject* fo);     // double-click on a remote item
 	void  OnTreeExpand(FileObject* fo);       // lazy-load a remote directory
 
+	// ── context-menu file operations (target = SetContextTarget) ────────────
+	void  SetContextTarget(FileObject* fo) { m_selected = fo; }
+	void  ActionRefreshDir();
+	void  ActionUploadTo();
+	void  ActionMkDir();
+	void  ActionMkFile();
+	void  ActionDownloadOpen();
+	void  ActionDownloadTo();
+	void  ActionRename();
+	void  ActionDelete();
+	void  ActionChmod();
+
 	// accessors for the ObjC data sources
 	FTPSession* Session()   { return m_session; }
 	vProfile*   Profiles()  { return m_profiles; }
