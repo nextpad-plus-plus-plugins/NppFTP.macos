@@ -58,6 +58,7 @@ public:
 	void  ActionAbort();
 	void  ActionDownloadSelected();
 	void  ActionUploadCurrent();
+	void  ActionProfileSettings();
 	void  ActionGlobalSettings();
 	void  ActionMessagesToggle();
 	void  OnTreeActivate(FileObject* fo);     // double-click on a remote item
@@ -71,6 +72,11 @@ public:
 
 private:
 	void  RebuildTree();
+	void  RefreshQueue();
+	// engine-event handlers (ported from FTPWindow::OnConnect/OnDisconnect/OnDirectoryRefresh)
+	void  OnConnect(int code);
+	void  OnDisconnect();
+	void  OnDirectoryRefresh(FileObject* parent, FTPFile* files, int count);
 
 	const NppData*  m_npp;
 	FTPSession*     m_session;

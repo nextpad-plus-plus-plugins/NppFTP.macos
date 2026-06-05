@@ -7,10 +7,13 @@
 #include "Scintilla.h"
 #include "FTPWindowController.h"
 #include "FileObject.h"
+#include "FTPFile.h"
 #include "PathUtils.h"
 #include "Output.h"
 
 extern "C" NppData* NppFTP_HostData();
+extern "C" void NppFTP_ShowProfileDialog(vProfile* profiles, FTPSettings* settings);
+extern "C" void NppFTP_ShowGlobalSettings(FTPSettings* settings);
 static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 	NppData* d = NppFTP_HostData();
 	return d->_sendMessage(d->_nppHandle, msg, w, l);
@@ -76,7 +79,17 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 - (void)tbUpload:(id)s     { self.ctrl->ActionUploadCurrent(); }
 - (void)tbRefresh:(id)s    { self.ctrl->ActionRefresh(); }
 - (void)tbAbort:(id)s      { self.ctrl->ActionAbort(); }
-- (void)tbSettings:(id)s   { self.ctrl->ActionGlobalSettings(); }
+- (void)tbSettings:(id)sender {
+	// Present the two settings entry points (matching the Windows "Settings" split).
+	NSMenu* m = [[NSMenu alloc] init];
+	[[m addItemWithTitle:@"Profile settings…" action:@selector(tbProfileSettings:) keyEquivalent:@""] setTarget:self];
+	[[m addItemWithTitle:@"Global settings…" action:@selector(tbGlobalSettings:) keyEquivalent:@""] setTarget:self];
+	NSView* v = [sender isKindOfClass:[NSView class]] ? (NSView*)sender : nil;
+	if (v) [m popUpMenuPositioningItem:nil atLocation:NSMakePoint(0, v.bounds.size.height) inView:v];
+	else   [m popUpMenuPositioningItem:nil atLocation:[NSEvent mouseLocation] inView:nil];
+}
+- (void)tbProfileSettings:(id)s { self.ctrl->ActionProfileSettings(); }
+- (void)tbGlobalSettings:(id)s  { self.ctrl->ActionGlobalSettings(); }
 - (void)tbMessages:(id)s   { self.ctrl->ActionMessagesToggle(); }
 
 // queue table (one row per active operation — minimal columns)
@@ -225,10 +238,129 @@ void FTPWindowController::Notify(int message, int code, QueueOperation* op) {
 }
 void FTPWindowController::ClearPending(QueueOperation*) {}
 
-void FTPWindowController::HandleNotification(int /*message*/, int /*code*/, QueueOperation* /*op*/) {
-	// Refresh the tree on any queue event; specific handling (open downloaded
-	// file via NPPM_DOOPEN) is wired with the operation result types next.
+// Ported from FTPWindow::OnEvent — dispatches a completed queue operation to the
+// matching GUI update (populate tree on connect/list, open downloaded file, etc.).
+void FTPWindowController::HandleNotification(int message, int code, QueueOperation* op) {
+	if (!op) { RebuildTree(); return; }
+
+	bool isStart = (message == (int)NotifyMessageStart);
+	bool isEnd   = (message == (int)NotifyMessageEnd);
+
+	// Add/Remove/Progress only affect the transfer-queue view.
+	if (!isStart && !isEnd) { RefreshQueue(); return; }
+
+	int   queueResult = op->GetResult();
+	void* queueData   = op->GetData();
+
+	switch (op->GetType()) {
+		case QueueOperation::QueueTypeConnect: {
+			if (isStart) { AppendOutput(0, "[NppFTP] Connecting..."); break; }
+			if (queueResult != -1) {
+				AppendOutput(0, "[NppFTP] Connected");
+				OnConnect(code);
+			} else {
+				AppendOutput(2, "[NppFTP] Unable to connect");
+				OnDisconnect();
+				if (m_session) m_session->TerminateSession();
+			}
+			break; }
+		case QueueOperation::QueueTypeDisconnect: {
+			if (isStart) break;
+			AppendOutput(0, "[NppFTP] Disconnected.");
+			OnDisconnect();
+			break; }
+		case QueueOperation::QueueTypeDirectoryGet: {
+			if (isStart) break;
+			QueueGetDir* dirop = (QueueGetDir*)op;
+			// Refresh any intermediate parent directories carried by the op...
+			std::vector<FTPDir*> parents = dirop->GetParentDirObjs();
+			for (size_t i = 0; i < parents.size(); i++) {
+				FTPDir* d = parents[i];
+				FileObject* parent = m_session ? m_session->FindPathObject(d->dirPath) : nullptr;
+				if (parent) OnDirectoryRefresh(parent, d->files, d->count);
+			}
+			if (queueResult == -1)
+				AppendOutput(2, "[NppFTP] Failure retrieving directory contents");
+			// ...then the requested directory itself.
+			FTPFile*    files  = (FTPFile*)queueData;
+			int         count  = dirop->GetFileCount();
+			FileObject* parent = m_session ? m_session->FindPathObject(dirop->GetDirPath()) : nullptr;
+			if (parent) OnDirectoryRefresh(parent, files, count);
+			break; }
+		case QueueOperation::QueueTypeDownloadHandle:
+		case QueueOperation::QueueTypeDownload: {
+			if (isStart) break;
+			QueueDownload* opdld = (QueueDownload*)op;
+			if (queueResult == -1) {
+				AppendOutput(2, "[NppFTP] Download failed");
+				break;
+			}
+			if (op->GetType() == QueueOperation::QueueTypeDownload) {
+				if (code == 0) {
+					// Download to cache: open the local file in the host editor.
+					AppendOutput(0, "[NppFTP] Download succeeded, opening file.");
+					hostMsg(NPPM_DOOPEN, 0, (intptr_t)opdld->GetLocalPath());
+				} else {
+					// Download to a chosen location: offer to open it.
+					int ret = MessageBox(nullptr, "The download is complete. Do you wish to open the file?",
+					                     "Download complete", MB_YESNO);
+					if (ret == IDYES)
+						hostMsg(NPPM_DOOPEN, 0, (intptr_t)opdld->GetLocalPath());
+				}
+			} else {
+				AppendOutput(0, "[NppFTP] Download succeeded.");
+			}
+			break; }
+		case QueueOperation::QueueTypeUpload: {
+			if (isStart) break;
+			if (queueResult == -1) { AppendOutput(2, "[NppFTP] Upload failed"); break; }
+			QueueUpload* opuld = (QueueUpload*)op;
+			AppendOutput(0, "[NppFTP] Upload succeeded.");
+			// Refresh the remote parent directory of the uploaded file.
+			char path[MAX_PATH];
+			strncpy(path, opuld->GetExternalPath(), MAX_PATH - 1); path[MAX_PATH - 1] = 0;
+			char* name = (char*)PU::FindExternalFilename(path);
+			if (name) { *name = 0; if (m_session) m_session->GetDirectory(path); }
+			break; }
+		default:
+			break;
+	}
+	RefreshQueue();
+}
+
+// ── engine-event handlers (ported from FTPWindow) ────────────────────────────
+void FTPWindowController::OnConnect(int code) {
+	m_selected = nullptr;
+	if (code != 0) { RebuildTree(); return; }   // automated connect: no auto-list
+	FileObject* root = m_session ? m_session->GetRootObject() : nullptr;
 	RebuildTree();
+	if (!root) return;
+	// Walk to the deepest pre-seeded child (the profile's initial remote dir)
+	// and list it, matching FTPWindow::OnConnect.
+	FileObject* last = root;
+	while (last->GetChildCount() > 0) last = last->GetChild(0);
+	if (m_session) m_session->GetDirectory(last->GetPath());
+}
+
+void FTPWindowController::OnDisconnect() {
+	m_selected = nullptr;
+	RebuildTree();   // RootObject() is now null → outline falls back to the profile list
+}
+
+void FTPWindowController::OnDirectoryRefresh(FileObject* parent, FTPFile* files, int count) {
+	if (!parent) return;
+	parent->SetRefresh(false);
+	// Delete the old children (the Cocoa outline holds no owning references — it
+	// re-queries on reloadData — so freeing here is safe and avoids a leak).
+	parent->RemoveAllChildren(true);
+	for (int i = 0; i < count; i++)
+		parent->AddChild(new FileObject(files + i));
+	parent->Sort();
+	RebuildTree();
+}
+
+void FTPWindowController::RefreshQueue() {
+	@autoreleasepool { if (m_queueTable) [(__bridge NSTableView*)m_queueTable reloadData]; }
 }
 
 // ── UIProvider ──────────────────────────────────────────────────────────────
@@ -308,7 +440,13 @@ void FTPWindowController::ActionUploadCurrent() {
 	hostMsg(NPPM_GETFULLCURRENTPATH, sizeof(path), (intptr_t)path);
 	// Upload-on-demand wiring (cache mapping) is completed with the dialogs.
 }
-void FTPWindowController::ActionGlobalSettings() {}   // Global settings dialog (next)
+void FTPWindowController::ActionProfileSettings() {
+	NppFTP_ShowProfileDialog(m_profiles, m_settings);
+	RebuildTree();   // profile list may have changed
+}
+void FTPWindowController::ActionGlobalSettings() {
+	NppFTP_ShowGlobalSettings(m_settings);
+}
 void FTPWindowController::ActionMessagesToggle() {}
 
 void FTPWindowController::OnTreeExpand(FileObject* fo) {
@@ -319,9 +457,13 @@ void FTPWindowController::OnTreeExpand(FileObject* fo) {
 void FTPWindowController::OnTreeActivate(FileObject* fo) {
 	if (!fo) return;
 	m_selected = fo;
-	if (fo->isDir()) { if (m_session) m_session->GetDirectory(fo->GetPath()); return; }
-	// download the file; when complete, HandleNotification opens it via NPPM_DOOPEN
-	if (m_session) m_session->DownloadFile(fo->GetPath(), _ConfigPath, true);
+	if (fo->isDir()) {
+		// toggle: collapse if expanded, else list + expand
+		if (m_session) m_session->GetDirectory(fo->GetPath());
+		return;
+	}
+	// Download to cache (notifies with code 0 → HandleNotification opens it via NPPM_DOOPEN).
+	if (m_session) m_session->DownloadFileCache(fo->GetPath());
 }
 
 // ── globals referenced by the plugin entry ───────────────────────────────────

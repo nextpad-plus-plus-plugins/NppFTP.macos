@@ -92,6 +92,27 @@ static int LoadSettings() {
 	return 0;
 }
 
+// Persist profiles + settings back to <config>/NppFTP/NppFTP.xml (mirror of LoadSettings).
+extern "C" void NppFTP_SaveSettings() {
+	if (!g_settings) return;
+	std::string xmlPath = g_configDir + "/NppFTP.xml";
+	TiXmlDocument doc(xmlPath.c_str());
+	TiXmlDeclaration decl("1.0", "UTF-8", "");
+	doc.InsertEndChild(decl);
+	TiXmlElement root("NppFTP");
+	TiXmlElement* profilesElem = FTPProfile::SaveProfiles(g_profiles);
+	if (profilesElem) { root.LinkEndChild(profilesElem); }
+	TiXmlElement settingsElem("Settings");
+	g_settings->SaveSettings(&settingsElem);
+	root.LinkEndChild(new TiXmlElement(settingsElem));
+	doc.InsertEndChild(root);
+	doc.SaveFile();
+}
+
+// Accessors for the dialogs (invoked from the controller).
+extern "C" vProfile*    NppFTP_Profiles()  { return &g_profiles; }
+extern "C" FTPSettings* NppFTP_Settings()  { return g_settings; }
+
 static int StartNppFTP() {
 	if (g_started) return 0;
 
