@@ -63,15 +63,22 @@ public:
 	void  OnTreeActivate(FileObject* fo);     // double-click on a remote item
 	void  OnTreeExpand(FileObject* fo);       // lazy-load a remote directory
 
-	// ── profile-tree actions (disconnected panel; context = SetContextProfile) ─
-	void  SetContextProfile(FTPProfile* p) { m_contextProfile = p; }
-	void  ActionCreateProfile();
+	// ── profile-tree (disconnected panel): folders, profiles, clipboard ───────
+	void* ProfileTree() { return m_profileTree; }        // ProfileNode* root
+	void  SetContextNode(void* node);                    // capture right-clicked node
+	bool  ClipboardActive() const { return m_clipProfile || !m_clipFolderPath.empty(); }
+	void  ActionCreateProfileHere();                     // new profile in context folder
+	void  ActionCreateFolder();                          // new folder in context folder
 	void  ActionConnectProfile(FTPProfile* p);
 	void  ActionConnectContextProfile();
 	void  ActionEditContextProfile();
-	void  ActionRenameContextProfile();
-	void  ActionDeleteContextProfile();
-	void  ActionCopyContextProfile();
+	void  ActionRenameContextProfile();                  // rename a profile
+	void  ActionDeleteContextProfile();                  // delete a profile
+	void  ActionRenameFolder();
+	void  ActionDeleteFolder();
+	void  ActionCutContext();
+	void  ActionCopyContext();
+	void  ActionPasteInto();
 
 	// ── context-menu file operations (target = SetContextTarget) ────────────
 	void  SetContextTarget(FileObject* fo) { m_selected = fo; }
@@ -118,7 +125,14 @@ private:
 	void*           m_toolbar;      // NSView* holding the toolbar buttons (tag 1 = needs connection)
 	void*           m_panelHandle;  // host panel handle from NPPM_DMM_REGISTERPANEL
 	FileObject*     m_selected;     // currently-selected remote object
-	FTPProfile*     m_contextProfile;  // right-clicked profile (disconnected tree)
+	void*           m_profileTree;     // ProfileNode* root (disconnected tree)
+	FTPProfile*     m_contextProfile;  // right-clicked profile leaf / folder dummy
+	bool            m_contextIsFolder; // right-clicked node is a folder
+	bool            m_contextIsRoot;   // ...and it is the "Profiles" root
+	std::string     m_contextFolderPath;  // group path of the right-clicked folder
+	FTPProfile*     m_clipProfile;     // clipboard: a profile (cut/copy)
+	std::string     m_clipFolderPath;  // clipboard: a folder path (cut/copy)
+	bool            m_clipIsCut;       // true = cut (move), false = copy
 	bool            m_visible;
 	std::vector<ActiveOp> m_activeOps;   // in-flight transfer queue
 };

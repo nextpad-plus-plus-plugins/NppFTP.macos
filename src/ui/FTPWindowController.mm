@@ -13,6 +13,8 @@
 #include <zlib.h>
 #include <libssh/libssh.h>
 #include <openssl/opensslv.h>
+#include <algorithm>
+#include <string>
 
 // Tiny target for the About box's buttons (Close / Visit site).
 @interface NppFTPAboutHelper : NSObject <NSWindowDelegate>
@@ -33,13 +35,64 @@ extern "C" void NppFTP_ShowProfileSettings(FTPProfile* profile);
 extern "C" void NppFTP_ShowGlobalSettings(FTPSettings* settings);
 extern "C" void NppFTP_SaveSettings();
 
-// Sentinels for the disconnected "Profiles" folder tree (no FileObjects exist
-// then). Low addresses never collide with heap FileObject pointers, and we only
-// use them when RootObject()==nullptr.
-static void* const kProfilesRoot = (void*)(intptr_t)1;
-static inline void* profileItemPtr(NSInteger i) { return (void*)(intptr_t)(2 + i); }
-static inline NSInteger profileItemIndex(void* p) { return (NSInteger)((intptr_t)p - 2); }
 static NSString* nsutf8(const char* s) { return [NSString stringWithUTF8String:s ? s : ""]; }
+
+// ── disconnected "Profiles" tree model ──────────────────────────────────────
+// Folders are encoded in each profile's group path (FTPProfile::GetParent(),
+// e.g. "" = top level, "/Work" = a folder). An EMPTY folder persists as a
+// "dummy" profile (empty name, Parent = the folder path) — exactly as upstream
+// NppFTP does. The tree is rebuilt from the profile list on each refresh.
+struct ProfileNode {
+	std::string name;       // display name (folder name, or profile name)
+	std::string path;       // group path of THIS node ("" root, "/Work", "/A/B")
+	bool        isFolder;
+	FTPProfile* profile;    // leaf → the profile; folder → backing dummy or null
+	std::vector<ProfileNode*> children;
+};
+
+static void freeProfileTree(ProfileNode* n) {
+	if (!n) return;
+	for (auto c : n->children) freeProfileTree(c);
+	delete n;
+}
+// Walk/create the folder chain for a group path; returns the deepest folder node.
+static ProfileNode* ensureFolder(ProfileNode* root, const std::string& path) {
+	ProfileNode* cur = root;
+	std::string accum;
+	size_t i = 0;
+	while (i < path.size()) {
+		if (path[i] == '/') { i++; continue; }
+		size_t j = path.find('/', i);
+		std::string comp = path.substr(i, (j == std::string::npos ? path.size() : j) - i);
+		i = (j == std::string::npos) ? path.size() : j;
+		accum += "/" + comp;
+		ProfileNode* next = nullptr;
+		for (auto c : cur->children) if (c->isFolder && c->name == comp) { next = c; break; }
+		if (!next) { next = new ProfileNode{comp, accum, true, nullptr, {}}; cur->children.push_back(next); }
+		cur = next;
+	}
+	return cur;
+}
+static void sortProfileNode(ProfileNode* n) {
+	std::sort(n->children.begin(), n->children.end(), [](ProfileNode* a, ProfileNode* b) {
+		if (a->isFolder != b->isFolder) return a->isFolder > b->isFolder;   // folders first
+		return a->name < b->name;
+	});
+	for (auto c : n->children) sortProfileNode(c);
+}
+static ProfileNode* buildProfileTree(vProfile* profiles) {
+	ProfileNode* root = new ProfileNode{"Profiles", "", true, nullptr, {}};
+	if (profiles) for (FTPProfile* p : *profiles) {
+		std::string parentPath = (p->GetParent() ? p->GetParent() : "");
+		ProfileNode* folder = ensureFolder(root, parentPath);
+		if (!p->GetName() || strlen(p->GetName()) == 0)
+			folder->profile = p;                 // dummy: backs this (possibly empty) folder
+		else
+			folder->children.push_back(new ProfileNode{p->GetName(), parentPath, false, p, {}});
+	}
+	sortProfileNode(root);
+	return root;
+}
 static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 	NppData* d = NppFTP_HostData();
 	return d->_sendMessage(d->_nppHandle, msg, w, l);
@@ -55,22 +108,24 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 @implementation NppFTPBridge
 
 // Connected → the remote FileObject tree (root = session RootObject).
-// Disconnected → a synthetic "Profiles" folder (kProfilesRoot) with the saved
-// profiles as leaf children, matching the Windows panel.
+// Disconnected → the "Profiles" folder tree (ProfileNode*, built from groups).
 - (NSInteger)outlineView:(NSOutlineView*)ov numberOfChildrenOfItem:(id)item {
 	FTPWindowController* c = self.ctrl;
 	if (c->RootObject()) {  // connected
 		FileObject* fo = item ? (FileObject*)[(NSValue*)item pointerValue] : c->RootObject();
 		return fo ? fo->GetChildCount() : 0;
 	}
-	if (!item) return 1;    // the "Profiles" root folder
-	if ([(NSValue*)item pointerValue] == kProfilesRoot) { vProfile* p = c->Profiles(); return p ? (NSInteger)p->size() : 0; }
-	return 0;               // a profile leaf
+	ProfileNode* root = (ProfileNode*)c->ProfileTree();
+	if (!root) return 0;
+	if (!item) return 1;    // the single "Profiles" root row
+	ProfileNode* n = (ProfileNode*)[(NSValue*)item pointerValue];
+	return (NSInteger)n->children.size();
 }
 - (BOOL)outlineView:(NSOutlineView*)ov isItemExpandable:(id)item {
 	FTPWindowController* c = self.ctrl;
 	if (c->RootObject()) { FileObject* fo = (FileObject*)[(NSValue*)item pointerValue]; return fo && fo->isDir(); }
-	return ([(NSValue*)item pointerValue] == kProfilesRoot);
+	ProfileNode* n = (ProfileNode*)[(NSValue*)item pointerValue];
+	return n && n->isFolder;
 }
 - (id)outlineView:(NSOutlineView*)ov child:(NSInteger)index ofItem:(id)item {
 	FTPWindowController* c = self.ctrl;
@@ -78,8 +133,9 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 		FileObject* parent = item ? (FileObject*)[(NSValue*)item pointerValue] : c->RootObject();
 		return [NSValue valueWithPointer:parent->GetChild((int)index)];
 	}
-	if (!item) return [NSValue valueWithPointer:kProfilesRoot];
-	return [NSValue valueWithPointer:profileItemPtr(index)];
+	if (!item) return [NSValue valueWithPointer:c->ProfileTree()];   // root node
+	ProfileNode* n = (ProfileNode*)[(NSValue*)item pointerValue];
+	return [NSValue valueWithPointer:n->children[(size_t)index]];
 }
 - (id)outlineView:(NSOutlineView*)ov objectValueForTableColumn:(NSTableColumn*)col byItem:(id)item {
 	FTPWindowController* c = self.ctrl;
@@ -87,13 +143,10 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 		FileObject* fo = (FileObject*)[(NSValue*)item pointerValue];
 		return fo ? nsutf8(fo->GetName()) : @"";
 	}
-	void* p = [(NSValue*)item pointerValue];
-	if (p == kProfilesRoot) return @"Profiles";
-	vProfile* pr = c->Profiles(); NSInteger idx = profileItemIndex(p);
-	if (pr && idx >= 0 && idx < (NSInteger)pr->size()) return nsutf8(pr->at(idx)->GetName());
-	return @"";
+	ProfileNode* n = (ProfileNode*)[(NSValue*)item pointerValue];
+	return n ? nsutf8(n->name.c_str()) : @"";
 }
-// Icon + name per row (folder for "Profiles"/dirs, globe for profiles, file icon).
+// Icon + name per row (folder for "Profiles"/folders/dirs, globe for profiles, file icon).
 - (NSView*)outlineView:(NSOutlineView*)ov viewForTableColumn:(NSTableColumn*)col item:(id)item {
 	NSTableCellView* cell = [ov makeViewWithIdentifier:@"NppFTPCell" owner:self];
 	if (!cell) {
@@ -114,14 +167,11 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 		icon = (fo && fo->isDir()) ? [NSImage imageNamed:NSImageNameFolder]
 		                           : [[NSWorkspace sharedWorkspace] iconForFileType:name.pathExtension ?: @""];
 	} else {                                     // disconnected profile tree
-		void* p = [(NSValue*)item pointerValue];
-		if (p == kProfilesRoot) { name = @"Profiles"; icon = [NSImage imageNamed:NSImageNameFolder]; }
-		else {
-			vProfile* pr = c->Profiles(); NSInteger idx = profileItemIndex(p);
-			if (pr && idx >= 0 && idx < (NSInteger)pr->size()) name = nsutf8(pr->at(idx)->GetName());
-			icon = [NSImage imageWithSystemSymbolName:@"globe" accessibilityDescription:@"profile"]
-			       ?: [NSImage imageNamed:NSImageNameNetwork];
-		}
+		ProfileNode* n = (ProfileNode*)[(NSValue*)item pointerValue];
+		if (n) name = nsutf8(n->name.c_str());
+		icon = (n && n->isFolder) ? [NSImage imageNamed:NSImageNameFolder]
+		     : ([NSImage imageWithSystemSymbolName:@"globe" accessibilityDescription:@"profile"]
+		        ?: [NSImage imageNamed:NSImageNameNetwork]);
 	}
 	cell.textField.stringValue = name;
 	cell.imageView.image = icon;
@@ -143,11 +193,9 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 		if (fo) c->OnTreeActivate(fo);
 		return;
 	}
-	// disconnected: double-click a profile → Connect (matches Win default action)
-	void* p = [(NSValue*)item pointerValue];
-	if (p == kProfilesRoot) return;
-	vProfile* pr = c->Profiles(); NSInteger idx = profileItemIndex(p);
-	if (pr && idx >= 0 && idx < (NSInteger)pr->size()) c->ActionConnectProfile(pr->at(idx));
+	// disconnected: double-click a profile leaf → Connect (Win default action)
+	ProfileNode* n = (ProfileNode*)[(NSValue*)item pointerValue];
+	if (n && !n->isFolder && n->profile) c->ActionConnectProfile(n->profile);
 }
 
 // toolbar actions
@@ -171,16 +219,30 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 	NSInteger row = self.outline.clickedRow;
 
 	if (!c->RootObject()) {
-		// ── disconnected: profile-tree menus ─────────────────────────────────
-		void* p = (row >= 0) ? [(NSValue*)[self.outline itemAtRow:row] pointerValue] : kProfilesRoot;
-		if (p == kProfilesRoot) {                 // the "Profiles" root folder
-			c->SetContextProfile(nullptr);
+		// ── disconnected: profile / folder menus (mirror Windows) ─────────────
+		ProfileNode* root = (ProfileNode*)c->ProfileTree();
+		ProfileNode* n = (row >= 0) ? (ProfileNode*)[(NSValue*)[self.outline itemAtRow:row] pointerValue] : root;
+		if (!n) n = root;
+		c->SetContextNode((void*)n);
+		BOOL pasteOK = c->ClipboardActive();
+		if (n->isFolder) {
 			[self addItem:menu title:@"Create new Profile" sel:@selector(ctxCreateProfile:)];
+			NSMenuItem* mkf = [self addItem:menu title:@"Create new Folder" sel:@selector(ctxCreateFolder:)];
+			mkf.attributedTitle = [[NSAttributedString alloc] initWithString:@"Create new Folder"
+				attributes:@{NSFontAttributeName:[NSFont boldSystemFontOfSize:[NSFont systemFontSize]]}];
+			if (n != root) {   // sub-folder: rename/delete/copy/cut
+				[self addItem:menu title:@"Rename Folder" sel:@selector(ctxRenameFolder:)];
+				[self addItem:menu title:@"Delete Folder" sel:@selector(ctxDeleteFolder:)];
+				[menu addItem:[NSMenuItem separatorItem]];
+				[self addItem:menu title:@"Copy Folder" sel:@selector(ctxCopyNode:)];
+				[self addItem:menu title:@"Cut Folder" sel:@selector(ctxCutNode:)];
+			}
+			[menu addItem:[NSMenuItem separatorItem]];
+			NSMenuItem* paste = [self addItem:menu title:@"Paste" sel:@selector(ctxPaste:)];
+			paste.enabled = pasteOK;
 			return;
 		}
-		vProfile* pr = c->Profiles(); NSInteger idx = profileItemIndex(p);
-		FTPProfile* prof = (pr && idx >= 0 && idx < (NSInteger)pr->size()) ? pr->at(idx) : nullptr;
-		c->SetContextProfile(prof);
+		// profile leaf
 		NSMenuItem* connect = [self addItem:menu title:@"Connect" sel:@selector(ctxConnectProfile:)];
 		connect.attributedTitle = [[NSAttributedString alloc] initWithString:@"Connect"
 			attributes:@{NSFontAttributeName:[NSFont boldSystemFontOfSize:[NSFont systemFontSize]]}];
@@ -189,7 +251,8 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 		[self addItem:menu title:@"Rename Profile" sel:@selector(ctxRenameProfile:)];
 		[self addItem:menu title:@"Delete Profile" sel:@selector(ctxDeleteProfile:)];
 		[menu addItem:[NSMenuItem separatorItem]];
-		[self addItem:menu title:@"Copy Profile" sel:@selector(ctxCopyProfile:)];
+		[self addItem:menu title:@"Copy Profile" sel:@selector(ctxCopyNode:)];
+		[self addItem:menu title:@"Cut Profile" sel:@selector(ctxCutNode:)];
 		return;
 	}
 
@@ -212,12 +275,17 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 	[self addItem:menu title:@"Delete" sel:@selector(ctxDelete:)];
 	[self addItem:menu title:@"Permissions…" sel:@selector(ctxChmod:)];
 }
-- (void)ctxCreateProfile:(id)s  { self.ctrl->ActionCreateProfile(); }
+- (void)ctxCreateProfile:(id)s  { self.ctrl->ActionCreateProfileHere(); }
+- (void)ctxCreateFolder:(id)s   { self.ctrl->ActionCreateFolder(); }
 - (void)ctxConnectProfile:(id)s { self.ctrl->ActionConnectContextProfile(); }
 - (void)ctxEditProfile:(id)s    { self.ctrl->ActionEditContextProfile(); }
 - (void)ctxRenameProfile:(id)s  { self.ctrl->ActionRenameContextProfile(); }
 - (void)ctxDeleteProfile:(id)s  { self.ctrl->ActionDeleteContextProfile(); }
-- (void)ctxCopyProfile:(id)s    { self.ctrl->ActionCopyContextProfile(); }
+- (void)ctxRenameFolder:(id)s   { self.ctrl->ActionRenameFolder(); }
+- (void)ctxDeleteFolder:(id)s   { self.ctrl->ActionDeleteFolder(); }
+- (void)ctxCutNode:(id)s        { self.ctrl->ActionCutContext(); }
+- (void)ctxCopyNode:(id)s       { self.ctrl->ActionCopyContext(); }
+- (void)ctxPaste:(id)s          { self.ctrl->ActionPasteInto(); }
 - (void)ctxRefresh:(id)s      { self.ctrl->ActionRefreshDir(); }
 - (void)ctxUpload:(id)s       { self.ctrl->ActionUploadTo(); }
 - (void)ctxMkdir:(id)s        { self.ctrl->ActionMkDir(); }
@@ -244,7 +312,9 @@ FTPWindowController::FTPWindowController(const NppData* npp)
 	: m_npp(npp), m_session(nullptr), m_profiles(nullptr), m_settings(nullptr),
 	  m_panelView(nullptr), m_outline(nullptr), m_queueTable(nullptr),
 	  m_outputView(nullptr), m_bridge(nullptr), m_toolbar(nullptr), m_panelHandle(nullptr),
-	  m_selected(nullptr), m_contextProfile(nullptr), m_visible(false) {}
+	  m_selected(nullptr), m_profileTree(nullptr), m_contextProfile(nullptr),
+	  m_contextIsFolder(false), m_contextIsRoot(false),
+	  m_clipProfile(nullptr), m_clipIsCut(false), m_visible(false) {}
 
 FTPWindowController::~FTPWindowController() {}
 
@@ -346,6 +416,7 @@ int FTPWindowController::Init(FTPSession* session, vProfile* vProfiles, FTPSetti
 
 int FTPWindowController::Destroy() {
 	if (m_panelHandle) hostMsg(NPPM_DMM_UNREGISTERPANEL, (uintptr_t)m_panelHandle, 0);
+	freeProfileTree((ProfileNode*)m_profileTree); m_profileTree = nullptr;
 	return 0;
 }
 
@@ -368,12 +439,17 @@ void* FTPWindowController::GetHWND() { return (void*)(Notifier*)this; }
 int FTPWindowController::OnActivateLocalFile(const char*) { return 0; }
 
 void FTPWindowController::RebuildTree() {
+	// Disconnected: rebuild the Profiles-folder tree from the saved profiles.
+	if (!RootObject()) {
+		freeProfileTree((ProfileNode*)m_profileTree);
+		m_profileTree = buildProfileTree(m_profiles);
+	}
 	@autoreleasepool {
 		NSOutlineView* ov = (__bridge NSOutlineView*)m_outline;
 		if (ov) {
 			[ov reloadData];
-			// Disconnected: show the "Profiles" folder expanded by default.
-			if (!RootObject()) [ov expandItem:[NSValue valueWithPointer:kProfilesRoot]];
+			if (!RootObject() && m_profileTree)   // show "Profiles" expanded by default
+				[ov expandItem:[NSValue valueWithPointer:m_profileTree]];
 		}
 	}
 	UpdateToolbarState();
@@ -645,15 +721,11 @@ void FTPWindowController::ActionConnectSelected() {
 	@autoreleasepool {
 		NSOutlineView* ov = (__bridge NSOutlineView*)m_outline;
 		NSInteger row = ov.selectedRow;
-		// Connect the selected profile in the tree; fall back to the first one.
-		if (row >= 0) {
-			void* p = [(NSValue*)[ov itemAtRow:row] pointerValue];
-			if (p != kProfilesRoot) {
-				NSInteger idx = profileItemIndex(p);
-				if (idx >= 0 && idx < (NSInteger)m_profiles->size()) { ActionConnectProfile(m_profiles->at(idx)); return; }
-			}
+		if (row >= 0) {   // connect the selected profile leaf
+			ProfileNode* n = (ProfileNode*)[(NSValue*)[ov itemAtRow:row] pointerValue];
+			if (n && !n->isFolder && n->profile) { ActionConnectProfile(n->profile); return; }
 		}
-		ActionConnectProfile(m_profiles->at(0));
+		ActionConnectProfile(m_profiles->at(0));   // fall back to the first profile
 	}
 }
 void FTPWindowController::ActionDisconnect() { if (m_session) m_session->TerminateSession(); RebuildTree(); }
@@ -677,14 +749,69 @@ void FTPWindowController::ActionGlobalSettings() {
 	NppFTP_ShowGlobalSettings(m_settings);
 }
 
-// ── profile-tree actions (disconnected panel) ────────────────────────────────
-void FTPWindowController::ActionCreateProfile() {
+// ── profile-tree actions (disconnected panel: folders + profiles + clipboard) ─
+// Group-path helpers. The root folder has path "" (== a profile's default
+// Parent). A folder under it is "/Name"; nested is "/A/B".
+static bool groupIsDescendant(const std::string& path, const std::string& folder) {
+	// true if `path` is `folder` itself or lives under it
+	if (path == folder) return true;
+	std::string prefix = folder + "/";
+	return path.compare(0, prefix.size(), prefix) == 0;
+}
+static std::string groupChild(const std::string& base, const std::string& name) {
+	return base + "/" + name;            // "" + "/x" = "/x"; "/a" + "/x" = "/a/x"
+}
+static std::string groupParent(const std::string& folder) {
+	size_t slash = folder.find_last_of('/');
+	return (slash == std::string::npos) ? "" : folder.substr(0, slash);
+}
+static std::string groupLeafName(const std::string& folder) {
+	size_t slash = folder.find_last_of('/');
+	return (slash == std::string::npos) ? folder : folder.substr(slash + 1);
+}
+// Is there already a folder with this exact group path among the profiles?
+static bool groupExists(vProfile* profiles, const std::string& path) {
+	for (FTPProfile* p : *profiles) {
+		std::string par = p->GetParent() ? p->GetParent() : "";
+		if (groupIsDescendant(par, path)) return true;
+	}
+	return false;
+}
+
+void FTPWindowController::SetContextNode(void* node) {
+	ProfileNode* n = (ProfileNode*)node;
+	ProfileNode* root = (ProfileNode*)m_profileTree;
+	m_contextIsRoot   = (n == root);
+	m_contextIsFolder = n ? n->isFolder : false;
+	if (n && n->isFolder) {
+		m_contextFolderPath = n->path;        // "" for root, "/Foo" for a folder
+		m_contextProfile    = n->profile;     // the folder's backing dummy (or null)
+	} else if (n) {
+		m_contextFolderPath = n->path;        // the leaf's group path (its folder)
+		m_contextProfile    = n->profile;
+	}
+}
+
+void FTPWindowController::ActionCreateProfileHere() {
 	if (!m_profiles || !m_settings) return;
 	FTPProfile* p = new FTPProfile("New profile");
 	p->SetCacheParent(m_settings->GetGlobalCache());
+	p->SetParent(m_contextFolderPath.c_str());   // "" = top level, "/Foo" = a folder
 	m_profiles->push_back(p); p->AddRef();
 	RebuildTree();
-	NppFTP_ShowProfileSettings(p);   // Windows opens the editor right after creating
+	NppFTP_ShowProfileSettings(p);               // open the editor right after creating
+	NppFTP_SaveSettings();
+	RebuildTree();
+}
+void FTPWindowController::ActionCreateFolder() {
+	if (!m_profiles) return;
+	// Pick a unique "New Folder" name under the context folder.
+	std::string base = m_contextFolderPath, path = groupChild(base, "New Folder");
+	for (int i = 2; groupExists(m_profiles, path); i++)
+		path = groupChild(base, std::string("New Folder ") + std::to_string(i));
+	FTPProfile* dummy = new FTPProfile("");       // empty name → backs an empty folder
+	dummy->SetParent(path.c_str());
+	m_profiles->push_back(dummy); dummy->AddRef();
 	NppFTP_SaveSettings();
 	RebuildTree();
 }
@@ -721,12 +848,84 @@ void FTPWindowController::ActionDeleteContextProfile() {
 	NppFTP_SaveSettings();
 	RebuildTree();
 }
-void FTPWindowController::ActionCopyContextProfile() {
-	if (!m_contextProfile || !m_profiles || !m_settings) return;
-	std::string name = std::string(m_contextProfile->GetName()) + " copy";
-	FTPProfile* p = new FTPProfile(name.c_str(), m_contextProfile);
-	p->SetCacheParent(m_settings->GetGlobalCache());
-	m_profiles->push_back(p); p->AddRef();
+void FTPWindowController::ActionRenameFolder() {
+	if (!m_profiles || m_contextFolderPath.empty()) return;   // can't rename root
+	std::string oldPath = m_contextFolderPath, name;
+	if (PromptInput(nullptr, "Rename folder", "New name:", groupLeafName(oldPath).c_str(), false, name) != 1 || name.empty()) return;
+	std::string newPath = groupChild(groupParent(oldPath), name);
+	if (newPath == oldPath) return;
+	for (FTPProfile* p : *m_profiles) {     // rewrite the group-path prefix on all descendants
+		std::string par = p->GetParent() ? p->GetParent() : "";
+		if (par == oldPath)                 p->SetParent(newPath.c_str());
+		else if (groupIsDescendant(par, oldPath))
+			p->SetParent((newPath + par.substr(oldPath.size())).c_str());
+	}
+	NppFTP_SaveSettings();
+	RebuildTree();
+}
+void FTPWindowController::ActionDeleteFolder() {
+	if (!m_profiles || m_contextFolderPath.empty()) return;
+	std::string folder = m_contextFolderPath;
+	if (MessageBox(nullptr, "Delete this folder and all profiles inside it?", "Confirm delete", MB_YESNO) != IDYES) return;
+	for (size_t i = m_profiles->size(); i-- > 0; ) {
+		std::string par = m_profiles->at(i)->GetParent() ? m_profiles->at(i)->GetParent() : "";
+		if (groupIsDescendant(par, folder)) {
+			FTPProfile* p = m_profiles->at(i);
+			m_profiles->erase(m_profiles->begin() + i); p->Release();
+		}
+	}
+	m_contextProfile = nullptr;
+	NppFTP_SaveSettings();
+	RebuildTree();
+}
+void FTPWindowController::ActionCutContext()  {
+	m_clipProfile = m_contextIsFolder ? nullptr : m_contextProfile;
+	m_clipFolderPath = m_contextIsFolder ? m_contextFolderPath : "";
+	m_clipIsCut = true;
+}
+void FTPWindowController::ActionCopyContext() {
+	m_clipProfile = m_contextIsFolder ? nullptr : m_contextProfile;
+	m_clipFolderPath = m_contextIsFolder ? m_contextFolderPath : "";
+	m_clipIsCut = false;
+}
+void FTPWindowController::ActionPasteInto() {
+	if (!m_profiles || !m_settings) return;
+	std::string target = m_contextFolderPath;   // paste into the right-clicked folder
+	if (m_clipProfile) {                         // ── a profile on the clipboard ──
+		if (m_clipIsCut) {
+			m_clipProfile->SetParent(target.c_str());           // move
+		} else {
+			FTPProfile* p = new FTPProfile(m_clipProfile->GetName(), m_clipProfile);  // duplicate
+			p->SetCacheParent(m_settings->GetGlobalCache());
+			p->SetParent(target.c_str());
+			m_profiles->push_back(p); p->AddRef();
+		}
+	} else if (!m_clipFolderPath.empty()) {      // ── a folder on the clipboard ──
+		std::string src = m_clipFolderPath;
+		std::string dst = groupChild(target, groupLeafName(src));
+		if (groupIsDescendant(dst, src)) return;            // can't paste a folder into itself
+		if (m_clipIsCut) {
+			for (FTPProfile* p : *m_profiles) {
+				std::string par = p->GetParent() ? p->GetParent() : "";
+				if (par == src)                  p->SetParent(dst.c_str());
+				else if (groupIsDescendant(par, src))
+					p->SetParent((dst + par.substr(src.size())).c_str());
+			}
+		} else {   // copy the whole subtree
+			std::vector<FTPProfile*> dups;
+			for (FTPProfile* p : *m_profiles) {
+				std::string par = p->GetParent() ? p->GetParent() : "";
+				if (!groupIsDescendant(par, src)) continue;
+				std::string np = (par == src) ? dst : (dst + par.substr(src.size()));
+				FTPProfile* c = new FTPProfile(p->GetName(), p);
+				c->SetCacheParent(m_settings->GetGlobalCache());
+				c->SetParent(np.c_str()); c->AddRef();
+				dups.push_back(c);
+			}
+			for (FTPProfile* c : dups) m_profiles->push_back(c);
+		}
+	} else return;
+	if (m_clipIsCut) { m_clipProfile = nullptr; m_clipFolderPath.clear(); }
 	NppFTP_SaveSettings();
 	RebuildTree();
 }
