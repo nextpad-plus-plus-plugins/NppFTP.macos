@@ -126,6 +126,7 @@ private:
 	void*           m_panelHandle;  // host panel handle from NPPM_DMM_REGISTERPANEL
 	FileObject*     m_selected;     // currently-selected remote object
 	void*           m_profileTree;     // ProfileNode* root (disconnected tree)
+	bool            m_treeConnectedMode;  // tracks the outline's current item type
 	FTPProfile*     m_contextProfile;  // right-clicked profile leaf / folder dummy
 	bool            m_contextIsFolder; // right-clicked node is a folder
 	bool            m_contextIsRoot;   // ...and it is the "Profiles" root

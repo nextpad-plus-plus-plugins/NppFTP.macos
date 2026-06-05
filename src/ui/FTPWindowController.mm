@@ -312,8 +312,8 @@ FTPWindowController::FTPWindowController(const NppData* npp)
 	: m_npp(npp), m_session(nullptr), m_profiles(nullptr), m_settings(nullptr),
 	  m_panelView(nullptr), m_outline(nullptr), m_queueTable(nullptr),
 	  m_outputView(nullptr), m_bridge(nullptr), m_toolbar(nullptr), m_panelHandle(nullptr),
-	  m_selected(nullptr), m_profileTree(nullptr), m_contextProfile(nullptr),
-	  m_contextIsFolder(false), m_contextIsRoot(false),
+	  m_selected(nullptr), m_profileTree(nullptr), m_treeConnectedMode(false),
+	  m_contextProfile(nullptr), m_contextIsFolder(false), m_contextIsRoot(false),
 	  m_clipProfile(nullptr), m_clipIsCut(false), m_visible(false) {}
 
 FTPWindowController::~FTPWindowController() {}
@@ -439,16 +439,26 @@ void* FTPWindowController::GetHWND() { return (void*)(Notifier*)this; }
 int FTPWindowController::OnActivateLocalFile(const char*) { return 0; }
 
 void FTPWindowController::RebuildTree() {
+	bool connected = (RootObject() != nullptr);
 	// Disconnected: rebuild the Profiles-folder tree from the saved profiles.
-	if (!RootObject()) {
+	if (!connected) {
 		freeProfileTree((ProfileNode*)m_profileTree);
 		m_profileTree = buildProfileTree(m_profiles);
 	}
 	@autoreleasepool {
 		NSOutlineView* ov = (__bridge NSOutlineView*)m_outline;
 		if (ov) {
+			// On a connect/disconnect switch the outline still retains the OTHER
+			// mode's items (ProfileNode* vs FileObject*). Drop them first — else
+			// reloadData re-queries a stale item under the wrong cast → crash.
+			if (connected != m_treeConnectedMode) {
+				id ds = ov.dataSource;
+				ov.dataSource = nil; [ov reloadData];
+				ov.dataSource = ds;
+				m_treeConnectedMode = connected;
+			}
 			[ov reloadData];
-			if (!RootObject() && m_profileTree)   // show "Profiles" expanded by default
+			if (!connected && m_profileTree)   // show "Profiles" expanded by default
 				[ov expandItem:[NSValue valueWithPointer:m_profileTree]];
 		}
 	}
@@ -647,9 +657,11 @@ void FTPWindowController::OnDisconnect() {
 void FTPWindowController::OnDirectoryRefresh(FileObject* parent, FTPFile* files, int count) {
 	if (!parent) return;
 	parent->SetRefresh(false);
-	// Delete the old children (the Cocoa outline holds no owning references — it
-	// re-queries on reloadData — so freeing here is safe and avoids a leak).
-	parent->RemoveAllChildren(true);
+	// Detach (don't delete) the old children: the NSOutlineView retains item
+	// identities (FileObject* wrapped in NSValue) for expansion state, so freeing
+	// them here would leave stale pointers it dereferences on the next reload.
+	// (Matches upstream NppFTP, which also passes false.)
+	parent->RemoveAllChildren(false);
 	for (int i = 0; i < count; i++)
 		parent->AddChild(new FileObject(files + i));
 	parent->Sort();
