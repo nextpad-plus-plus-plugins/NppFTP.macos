@@ -125,6 +125,8 @@ typedef const wchar_t*      LPCWSTR;
 #endif
 
 typedef wchar_t             WCHAR;
+typedef uint8_t             BOOLEAN;
+typedef void*               HTREEITEM;   // UI tree handle (opaque to the engine)
 typedef size_t              SIZE_T;
 typedef intptr_t            LONG_PTR;
 typedef uintptr_t           ULONG_PTR;
@@ -303,9 +305,46 @@ static inline int  WSAGetLastError(void) { return errno; }
 static inline int   lstrlenA(LPCSTR s) { return s ? (int)strlen(s) : 0; }
 static inline LPSTR lstrcpyA(LPSTR d, LPCSTR s) { return strcpy(d, s); }
 static inline LPSTR lstrcatA(LPSTR d, LPCSTR s) { return strcat(d, s); }
-#define lstrlen  lstrlenA
-#define lstrcpy  lstrcpyA
-#define lstrcat  lstrcatA
+static inline int   lstrcmpA(LPCSTR a, LPCSTR b) { return strcmp(a, b); }
+static inline int   lstrcmpiA(LPCSTR a, LPCSTR b) { return strcasecmp(a, b); }
+#define lstrlen   lstrlenA
+#define lstrcpy   lstrcpyA
+#define lstrcat   lstrcatA
+#define lstrcmp   lstrcmpA
+#define lstrcmpi  lstrcmpiA
+
+// MessageBox flags / return codes (the few NppFTP references; the actual
+// MessageBox calls are in UI code, replaced by Cocoa alerts).
+#ifndef MB_OK
+  #define MB_OK              0x00000000
+  #define MB_OKCANCEL        0x00000001
+  #define MB_YESNO           0x00000004
+  #define MB_ICONERROR       0x00000010
+  #define MB_ICONQUESTION    0x00000020
+  #define MB_ICONWARNING     0x00000030
+  #define MB_ICONINFORMATION 0x00000040
+  #define MB_DEFBUTTON1      0x00000000
+  #define MB_DEFBUTTON2      0x00000100
+  #define IDOK     1
+  #define IDCANCEL 2
+  #define IDYES    6
+  #define IDNO     7
+#endif
+
+#ifndef Int32x32To64
+  #define Int32x32To64(a, b) ((LONGLONG)(a) * (LONGLONG)(b))
+  #define UInt32x32To64(a, b) ((ULONGLONG)(a) * (ULONGLONG)(b))
+#endif
+#ifndef ZeroMemory
+  #define ZeroMemory(p, n)   memset((p), 0, (n))
+  #define CopyMemory(d, s, n) memcpy((d), (s), (n))
+  #define FillMemory(p, n, v) memset((p), (v), (n))
+#endif
+static inline LPTSTR lstrcpynA(LPTSTR dst, LPCTSTR src, int n) {
+    if (n <= 0) return dst;
+    strncpy(dst, src, (size_t)n - 1); dst[n - 1] = 0; return dst;
+}
+#define lstrcpyn lstrcpynA
 // _tcs* family (TCHAR==char)
 #define _tcslen   strlen
 #define _tcscpy   strcpy
@@ -418,6 +457,7 @@ static inline HANDLE   WSAAsyncGetHostByName(HWND, UINT, const char*, char*, int
   #define ERROR_ACCESS_DENIED     5
   #define ERROR_HANDLE_EOF        38
   #define ERROR_ALREADY_EXISTS    183
+  #define ERROR_FILE_EXISTS       80
   #define ERROR_MORE_DATA         234
   #define ERROR_IO_PENDING        997
 #endif
@@ -442,7 +482,22 @@ void     UnixTimeToFileTime(time_t t, FILETIME* ft);
 time_t   FileTimeToUnixTime(const FILETIME* ft);
 void     SystemTimeToFileTime_compat(const SYSTEMTIME* st, FILETIME* ft);
 
+// Win32 time API (win_compat.cpp).
+void     GetSystemTime(SYSTEMTIME* st);                          // UTC
+void     GetLocalTime(SYSTEMTIME* st);                           // local
+BOOL     SystemTimeToFileTime(const SYSTEMTIME* st, FILETIME* ft);
+BOOL     FileTimeToSystemTime(const FILETIME* ft, SYSTEMTIME* st);
+BOOL     FileTimeToLocalFileTime(const FILETIME* ft, FILETIME* local);
+
+// UTF-8 <-> wchar_t (wchar_t is 32-bit on macOS; self-consistent round-trip).
+int  MultiByteToWideChar(UINT cp, DWORD flags, LPCSTR src, int srcLen, wchar_t* dst, int dstLen);
+int  WideCharToMultiByte(UINT cp, DWORD flags, const wchar_t* src, int srcLen, LPSTR dst, int dstLen,
+                         LPCSTR defChar, BOOL* usedDefault);
+
 // File + memory-mapping shims (HANDLE-based file I/O, mmap, temp paths, etc.).
 #include "win_file.h"
+// shlwapi Path* helpers + the thread shim.
+#include "win_path.h"
+#include "win_thread.h"
 
 #endif // NPPFTP_WIN_COMPAT_H

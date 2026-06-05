@@ -18,6 +18,7 @@
 
 #include "StdInc.h"
 //#include "Output.h"
+#include "UIProvider.h"
 #include "FTPSettings.h"
 
 

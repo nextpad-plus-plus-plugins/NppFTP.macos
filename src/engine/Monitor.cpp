@@ -1,19 +1,12 @@
 /*
     NppFTP: FTP/SFTP functionality for Notepad++
     Copyright (C) 2010  Harry (harrybharry@users.sourceforge.net)
+    macOS port 2026.
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+    (at your option) any later version. See <http://www.gnu.org/licenses/>.
 */
 
 #include "StdInc.h"
@@ -23,32 +16,23 @@ Monitor::Monitor(int nrConditions) :
 	m_nrConditions(nrConditions),
 	m_enterCount(0)
 {
-	InitializeCriticalSection(&m_critMonitor);
-	m_conditions = new HANDLE[m_nrConditions];
-	for(int i = 0; i < m_nrConditions; i++) {
-		m_conditions[i] = CreateEvent(NULL, FALSE, FALSE, NULL);
-	}
+	m_conditions = new AutoResetEvent[m_nrConditions];
 }
+
 Monitor::~Monitor() {
-	DeleteCriticalSection(&m_critMonitor);
-	for(int i = 0; i < m_nrConditions; i++) {
-		CloseHandle(m_conditions[i]);
-	}
 	delete [] m_conditions;
 }
 
 int Monitor::Enter() {
-	EnterCriticalSection(&m_critMonitor);
-
+	m_critMonitor.lock();
 	m_enterCount++;
-
 	return 0;
 }
 
 int Monitor::Exit() {
 	if (m_enterCount > 0) {
 		m_enterCount--;
-		LeaveCriticalSection(&m_critMonitor);
+		m_critMonitor.unlock();
 	} else {
 		return -1;
 	}
@@ -57,11 +41,23 @@ int Monitor::Exit() {
 
 int Monitor::Wait(int condition) {
 	//This can cause a deadlock in rare cases. Just dont do an Enter();Signal(); combo
-	ResetEvent(m_conditions[condition]);
+	AutoResetEvent & ev = m_conditions[condition];
+
+	// ResetEvent: clear any pending signal before releasing the monitor.
+	{
+		std::lock_guard<std::mutex> lk(ev.m);
+		ev.signaled = false;
+	}
 
 	Exit();
 
-	WaitForSingleObject(m_conditions[condition], INFINITE);
+	// WaitForSingleObject(INFINITE) on an auto-reset event: wait until signaled,
+	// then consume the signal (auto-reset).
+	{
+		std::unique_lock<std::mutex> lk(ev.m);
+		ev.cv.wait(lk, [&ev]{ return ev.signaled; });
+		ev.signaled = false;
+	}
 
 	Enter();
 
@@ -69,7 +65,11 @@ int Monitor::Wait(int condition) {
 }
 
 int Monitor::Signal(int condition) {
-	SetEvent(m_conditions[condition]);
-
+	AutoResetEvent & ev = m_conditions[condition];
+	{
+		std::lock_guard<std::mutex> lk(ev.m);
+		ev.signaled = true;
+	}
+	ev.cv.notify_one();
 	return 0;
 }

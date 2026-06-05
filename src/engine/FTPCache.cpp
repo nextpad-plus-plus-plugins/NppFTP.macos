@@ -18,6 +18,8 @@
 
 #include "StdInc.h"
 #include "FTPCache.h"
+#include "mac_fs.h"
+#include "UIProvider.h"
 
 #include <algorithm>
 
@@ -164,35 +166,16 @@ int FTPCache::GetLocalPathFromExternal(const char * externalpath, TCHAR * localb
 }
 
 int FTPCache::ClearCurrentCache(bool permanent) {
-	SHFILEOPSTRUCT shfop;
-	TCHAR * dirPath = new TCHAR[MAX_PATH+1];
-
-	ZeroMemory(&shfop, sizeof(shfop));
-	shfop.hwnd = _MainOutputWindow;
-	shfop.wFunc = FO_DELETE;
-	shfop.pFrom = dirPath;
-	shfop.pTo = NULL;
-	shfop.fFlags = FOF_NOCONFIRMATION | FOF_NOCONFIRMMKDIR | FOF_NOERRORUI | FOF_SILENT;// | FOF_WANTNUKEWARNING;
-	if (!permanent) {
-		shfop.fFlags |= FOF_ALLOWUNDO;	//use recycle bin
-	}
-	shfop.lpszProgressTitle = NULL;
-
-
-
+	// macOS: move the cache directory to the Trash (recycle bin), or delete it
+	// permanently. Replaces the Win32 SHFileOperation(FO_DELETE) call.
 	for(size_t i = 0; i < m_vCachePaths.size(); i++) {
 		OutDebug("[FTPCache] Clearing cache in '%T'", m_vCachePaths[i].localpathExpanded);
-		lstrcpy(dirPath, m_vCachePaths[i].localpathExpanded);
-		int len = lstrlen(dirPath);
-		dirPath[len+1] = 0;
-		int res = SHFileOperation(&shfop);
+		int res = MacRecycleOrDeletePath(m_vCachePaths[i].localpathExpanded, permanent ? 1 : 0);
 		if (res != 0) {
 			//Error may also be triggered if cache is empty, so stay silent
 			//OutErr("Failure clearing cache: %d", res);
 		}
 	}
-
-	delete [] dirPath;
 
 	if (m_cacheParent)
 		return m_cacheParent->ClearCurrentCache(permanent);
@@ -337,7 +320,7 @@ TCHAR* FTPCache::ExpandPath(const TCHAR * path) {
 	}
 	replacestring = SU::ReplaceString(replacestring, TEXT("%USERNAME%"), m_activeUser);
 	replacestring = SU::ReplaceString(replacestring, TEXT("%HOSTNAME%"), m_activeHost);
-	tstring port = std::to_wstring(m_activePort);
+	tstring port = std::to_string(m_activePort);
 	replacestring = SU::ReplaceString(replacestring, TEXT("%PORT%"), port);
 
 	TCHAR * expanded = new TCHAR[MAX_PATH];

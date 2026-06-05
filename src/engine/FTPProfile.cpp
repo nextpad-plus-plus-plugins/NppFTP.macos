@@ -69,7 +69,7 @@ FTPProfile::FTPProfile(const TCHAR * name) :
 	m_cache = new FTPCache();
 
 	m_name = SU::DupString(name);
-	m_parent = SU::DupString(L"");
+	m_parent = SU::DupString("");
 	m_hostname = SU::strdup("");
 	m_username = SU::strdup("");
 	m_password = SU::strdup("");

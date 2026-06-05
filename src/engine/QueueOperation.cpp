@@ -18,6 +18,7 @@
 
 #include "StdInc.h"
 #include "QueueOperation.h"
+#include "Notify.h"
 
 const int QueueConditionAcked = 0;
 const int QueueConditionCount = 1;
@@ -107,9 +108,14 @@ int QueueOperation::SendNotification(QueueEvent event) {
 			break;
 	}
 
-	DWORD curThread = GetCurrentThreadId();
-	if (m_winThread == curThread) {
-		::SendMessage(m_hNotify, msg, m_notifyCode, (LPARAM)this);
+	// m_hNotify carries the Notifier* (the Cocoa FTP window / test stub).
+	Notifier * notifier = (Notifier *)m_hNotify;
+	if (!notifier)
+		return 0;
+
+	if (notifier->IsUIThread()) {
+		// On the UI thread: handle synchronously, no ack/wait (avoids deadlock).
+		notifier->Notify((int)msg, m_notifyCode, this);
 		return 0;
 	}
 
@@ -119,7 +125,9 @@ int QueueOperation::SendNotification(QueueEvent event) {
 			return 0;
 		}
 
-		::PostMessage(m_hNotify, msg, m_notifyCode, (LPARAM)this);
+		// Off the UI thread: the implementation marshals to the main thread,
+		// handles, then calls AckNotification(). We block until acked.
+		notifier->Notify((int)msg, m_notifyCode, this);
 		m_ackMonitor.Wait(QueueConditionAcked);
 	m_ackMonitor.Exit();
 
@@ -137,11 +145,7 @@ int QueueOperation::ClearPendingNotifications() {
 	if (!m_hNotify)
 		return -1;
 
-	MSG msg;
-	BOOL res = ::PeekMessage(&msg, m_hNotify, NotifyMessageMIN, NotifyMessageMAX, PM_REMOVE);
-	while(res == TRUE) {
-		res = ::PeekMessage(&msg, m_hNotify, NotifyMessageMIN, NotifyMessageMAX, PM_REMOVE);
-	}
+	((Notifier *)m_hNotify)->ClearPending(this);
 
 	return 0;
 }

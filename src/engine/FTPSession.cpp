@@ -18,6 +18,7 @@
 
 #include "StdInc.h"
 #include "FTPSession.h"
+#include "UIProvider.h"
 
 #include "FTPWindow.h"
 

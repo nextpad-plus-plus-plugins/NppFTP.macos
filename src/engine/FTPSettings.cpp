@@ -18,6 +18,7 @@
 
 #include "StdInc.h"
 #include "FTPSettings.h"
+#include "UIProvider.h"
 
 #include "Encryption.h"
 #include "InputDialog.h"

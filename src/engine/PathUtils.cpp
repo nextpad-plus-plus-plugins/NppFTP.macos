@@ -19,8 +19,6 @@
 #include "StdInc.h"
 #include "PathUtils.h"
 
-#include <shlobj.h>
-#include <commdlg.h>
 
 int PU::LocalToExternalPath(const TCHAR * local, char * external, int externalsize) {
 	if (!local || !external || externalsize == 0)
@@ -228,90 +226,19 @@ int PU::CreateLocalDirFile(const TCHAR * file) {
 	return CreateLocalDir(path);
 }
 
-int PU::GetOpenFilename(TCHAR * buffer, int bufSize, HWND hOwner) {
-	if (!buffer || bufSize == 0)
-		return -1;
-
-	if (!hOwner)
-		hOwner = _MainOutputWindow;
-
-	OPENFILENAME ofn{};
-	ofn.lStructSize = sizeof(ofn);	//not NT4.0 compatible
-	ofn.hwndOwner = hOwner;
-	ofn.lpstrFilter = NULL;	//accept everything
-	ofn.lpstrCustomFilter = NULL;
-	ofn.nFilterIndex = 1;
-	ofn.lpstrFile = buffer;
-	ofn.nMaxFile = bufSize;
-	ofn.lpstrFileTitle = NULL;
-	ofn.lpstrInitialDir = NULL;
-	ofn.lpstrTitle = NULL;
-	ofn.Flags = OFN_FILEMUSTEXIST|OFN_HIDEREADONLY|OFN_LONGNAMES|OFN_PATHMUSTEXIST;
-	ofn.lpstrDefExt = NULL;
-	ofn.FlagsEx = 0;
-
-	BOOL res = ::GetOpenFileName(&ofn);
-	if (res == FALSE)
-		return -1;
-	return 0;
+// macOS: the file/folder pickers are native NSOpenPanel/NSSavePanel invoked
+// directly by the Cocoa dialogs; the engine no longer routes through these
+// Win32 helpers. Kept as stubs so any residual call is a harmless "cancelled".
+int PU::GetOpenFilename(TCHAR * /*buffer*/, int /*bufSize*/, HWND /*hOwner*/) {
+	return -1;
 }
 
-int PU::GetSaveFilename(TCHAR * buffer, int bufSize, HWND hOwner) {
-	if (!buffer || bufSize == 0)
-		return -1;
-
-	if (!hOwner)
-		hOwner = _MainOutputWindow;
-
-	OPENFILENAME ofn{};
-	ofn.lStructSize = sizeof(ofn);	//not NT4.0 compatible
-	ofn.hwndOwner = hOwner;
-	ofn.lpstrFilter = NULL;	//accept everything
-	ofn.lpstrCustomFilter = NULL;
-	ofn.nFilterIndex = 1;
-	ofn.lpstrFile = buffer;
-	ofn.nMaxFile = bufSize;
-	ofn.lpstrFileTitle = NULL;
-	ofn.lpstrInitialDir = NULL;
-	ofn.lpstrTitle = NULL;
-	ofn.Flags = OFN_HIDEREADONLY|OFN_LONGNAMES|OFN_OVERWRITEPROMPT;
-	ofn.lpstrDefExt = NULL;
-	ofn.FlagsEx = 0;
-
-	BOOL res = ::GetSaveFileName(&ofn);
-	if (res == FALSE)
-		return -1;
-	return 0;
+int PU::GetSaveFilename(TCHAR * /*buffer*/, int /*bufSize*/, HWND /*hOwner*/) {
+	return -1;
 }
 
-int PU::BrowseDirectory(TCHAR * buffer, int bufSize, HWND hOwner) {
-	if (bufSize < MAX_PATH)
-		return -1;
-
-	if (!hOwner)
-		hOwner = _MainOutputWindow;
-	//TODO: detect Vista+ and use IFileDialog
-	BROWSEINFO bi{};
-	bi.hwndOwner = hOwner;
-	bi.pidlRoot = NULL;	//desktop
-	bi.pszDisplayName = buffer;
-	bi.lpszTitle = TEXT("Please pick a location");
-	bi.ulFlags = 0;
-	bi.lpfn = NULL;
-	bi.lParam = 0;
-	bi.iImage = 0;
-
-	LPITEMIDLIST pidl = SHBrowseForFolder(&bi);
-	if (!pidl)
-		return -1;
-
-	BOOL bResult = SHGetPathFromIDList(pidl, buffer);
-	CoTaskMemFree(pidl);
-
-	if (bResult == FALSE)
-		return -1;
-
-	return 0;
+int PU::BrowseDirectory(TCHAR * /*buffer*/, int /*bufSize*/, HWND /*hOwner*/) {
+	return -1;
 }
 
 int PU::SimplifyExternalPath(const char * path, const char * currentDir, char * buffer, int bufSize) {

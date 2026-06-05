@@ -19,6 +19,9 @@
 #ifndef MONITOR_H
 #define MONITOR_H
 
+#include <mutex>
+#include <condition_variable>
+
 class Monitor {	//Should actually be: Half-assed monitor
 public:
 							Monitor(int nrConditions);
@@ -30,9 +33,16 @@ public:
 	virtual int				Wait(int condition);
 	virtual int				Signal(int condition);
 private:
+	// Standalone auto-reset event (was an auto-reset HANDLE event on Windows).
+	struct AutoResetEvent {
+		std::mutex				m;
+		std::condition_variable	cv;
+		bool					signaled = false;
+	};
+
 	int						m_nrConditions;
-	CRITICAL_SECTION		m_critMonitor;
-	HANDLE*					m_conditions;
+	std::recursive_mutex	m_critMonitor;
+	AutoResetEvent*			m_conditions;
 
 	int						m_enterCount;
 };
