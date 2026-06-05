@@ -50,7 +50,9 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 
 - (NSInteger)outlineView:(NSOutlineView*)ov numberOfChildrenOfItem:(id)item {
 	FileObject* fo = item ? (FileObject*)[(NSValue*)item pointerValue] : self.ctrl->RootObject();
-	return fo ? fo->GetChildCount() : (NSInteger)self.ctrl->Profiles()->size();
+	if (fo) return fo->GetChildCount();
+	vProfile* p = self.ctrl->Profiles();   // may be null before Init()
+	return p ? (NSInteger)p->size() : 0;
 }
 - (BOOL)outlineView:(NSOutlineView*)ov isItemExpandable:(id)item {
 	FileObject* fo = (FileObject*)[(NSValue*)item pointerValue];
@@ -66,9 +68,10 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 - (id)outlineView:(NSOutlineView*)ov objectValueForTableColumn:(NSTableColumn*)col byItem:(id)item {
 	FileObject* root = self.ctrl->RootObject();
 	if (!root) {  // profile list
+		vProfile* p = self.ctrl->Profiles();
 		intptr_t idx = (intptr_t)[(NSValue*)item pointerValue] - 1;
-		if (idx >= 0 && (size_t)idx < self.ctrl->Profiles()->size())
-			return [NSString stringWithUTF8String:self.ctrl->Profiles()->at(idx)->GetName()];
+		if (p && idx >= 0 && (size_t)idx < p->size())
+			return [NSString stringWithUTF8String:p->at(idx)->GetName()];
 		return @"";
 	}
 	FileObject* fo = (FileObject*)[(NSValue*)item pointerValue];
