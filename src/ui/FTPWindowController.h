@@ -122,6 +122,9 @@ private:
 	void*           m_outline;      // NSOutlineView* (remote tree)
 	void*           m_queueTable;   // NSTableView* (transfer queue)
 	void*           m_outputView;   // NSTextView* (messages)
+	void*           m_outputPanel;  // NSView* (the separate Output dock panel)
+	void*           m_outputHandle; // host handle for the Output panel
+	bool            m_outputVisible;// Output panel show/hide state
 	void*           m_bridge;       // ObjC data-source/delegate bridge
 	void*           m_toolbar;      // NSView* holding the toolbar buttons (tag 1 = needs connection)
 	void*           m_panelHandle;  // host panel handle from NPPM_DMM_REGISTERPANEL

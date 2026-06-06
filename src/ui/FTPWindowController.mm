@@ -311,7 +311,8 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 FTPWindowController::FTPWindowController(const NppData* npp)
 	: m_npp(npp), m_session(nullptr), m_profiles(nullptr), m_settings(nullptr),
 	  m_panelView(nullptr), m_outline(nullptr), m_queueTable(nullptr),
-	  m_outputView(nullptr), m_bridge(nullptr), m_toolbar(nullptr), m_panelHandle(nullptr),
+	  m_outputView(nullptr), m_outputPanel(nullptr), m_outputHandle(nullptr), m_outputVisible(false),
+	  m_bridge(nullptr), m_toolbar(nullptr), m_panelHandle(nullptr),
 	  m_rootObj(nullptr), m_selected(nullptr), m_profileTree(nullptr), m_treeConnectedMode(false),
 	  m_pendingTerminate(false),
 	  m_contextProfile(nullptr), m_contextIsFolder(false), m_contextIsRoot(false),
@@ -362,8 +363,8 @@ int FTPWindowController::Create(void*, void*, int, int) {
 		m_toolbar = (void*)CFBridgingRetain(tb);
 		[panel addSubview:tb];
 
-		// remote tree
-		NSScrollView* treeScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 220, 320, 350)];
+		// remote tree (taller now that the Output lives in its own panel)
+		NSScrollView* treeScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 110, 320, 460)];
 		treeScroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 		treeScroll.hasVerticalScroller = YES; treeScroll.borderType = NSBezelBorder;
 		NSOutlineView* outline = [[NSOutlineView alloc] initWithFrame:treeScroll.bounds];
@@ -394,20 +395,27 @@ int FTPWindowController::Create(void*, void*, int, int) {
 		[panel addSubview:qScroll];
 		m_queueTable = (void*)CFBridgingRetain(qtable);
 
-		// messages (hidden by default; toggled by the Messages button)
-		NSScrollView* oScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 320, 108)];
-		oScroll.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
-		oScroll.hasVerticalScroller = YES; oScroll.borderType = NSBezelBorder;
-		NSTextView* tv = [[NSTextView alloc] initWithFrame:oScroll.bounds];
-		tv.editable = NO; tv.font = [NSFont fontWithName:@"Menlo" size:10] ?: [NSFont systemFontOfSize:10];
-		oScroll.documentView = tv;
-		[panel addSubview:oScroll];
-		m_outputView = (void*)CFBridgingRetain(tv);
-
 		m_panelView = (void*)CFBridgingRetain(panel);
 
-		// Register as a docked panel (host strong-retains the view).
-		m_panelHandle = (void*)hostMsg(NPPM_DMM_REGISTERPANEL, (uintptr_t)panel, (intptr_t)"NppFTP");
+		// ── separate "NppFTP - Output" dock panel (toggled by the Messages button,
+		//    like the Windows Output window / AnalysePlugin) ──────────────────────
+		NSView* outPanel = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 360, 220)];
+		NSScrollView* oScroll = [[NSScrollView alloc] initWithFrame:outPanel.bounds];
+		oScroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+		oScroll.hasVerticalScroller = YES; oScroll.borderType = NSNoBorder;
+		NSTextView* tv = [[NSTextView alloc] initWithFrame:oScroll.bounds];
+		tv.editable = NO; tv.font = [NSFont fontWithName:@"Menlo" size:11] ?: [NSFont systemFontOfSize:11];
+		tv.minSize = NSMakeSize(0, 0); tv.maxSize = NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX);
+		tv.verticallyResizable = YES; tv.horizontallyResizable = NO;
+		tv.autoresizingMask = NSViewWidthSizable;
+		oScroll.documentView = tv;
+		[outPanel addSubview:oScroll];
+		m_outputView  = (void*)CFBridgingRetain(tv);
+		m_outputPanel = (void*)CFBridgingRetain(outPanel);
+
+		// Register both docked panels (host strong-retains the views; both start hidden).
+		m_panelHandle  = (void*)hostMsg(NPPM_DMM_REGISTERPANEL, (uintptr_t)panel,    (intptr_t)"NppFTP");
+		m_outputHandle = (void*)hostMsg(NPPM_DMM_REGISTERPANEL, (uintptr_t)outPanel, (intptr_t)"NppFTP - Output");
 	}
 	return 0;
 }
@@ -419,7 +427,8 @@ int FTPWindowController::Init(FTPSession* session, vProfile* vProfiles, FTPSetti
 }
 
 int FTPWindowController::Destroy() {
-	if (m_panelHandle) hostMsg(NPPM_DMM_UNREGISTERPANEL, (uintptr_t)m_panelHandle, 0);
+	if (m_panelHandle)  hostMsg(NPPM_DMM_UNREGISTERPANEL, (uintptr_t)m_panelHandle, 0);
+	if (m_outputHandle) hostMsg(NPPM_DMM_UNREGISTERPANEL, (uintptr_t)m_outputHandle, 0);
 	freeProfileTree((ProfileNode*)m_profileTree); m_profileTree = nullptr;
 	return 0;
 }
@@ -490,12 +499,19 @@ void FTPWindowController::UpdateToolbarState() {
 	}
 }
 
-void FTPWindowController::AppendOutput(int /*type*/, const char* msg) {
+void FTPWindowController::AppendOutput(int type, const char* msg) {
 	@autoreleasepool {
 		NSTextView* tv = (__bridge NSTextView*)m_outputView;
 		if (!tv) return;
-		NSString* line = [NSString stringWithFormat:@"%s\n", msg ? msg : ""];
-		[tv.textStorage.mutableString appendString:line];
+		// Each line is timestamped HH:mm:ss, matching the Windows Output window.
+		static NSDateFormatter* df = nil;
+		if (!df) { df = [[NSDateFormatter alloc] init]; df.dateFormat = @"HH:mm:ss"; df.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"]; }
+		NSString* ts   = [df stringFromDate:[NSDate date]];
+		NSString* line = [NSString stringWithFormat:@"%@  %s\n", ts, msg ? msg : ""];
+		NSColor* color = (type == 2 /*Output_Err*/) ? [NSColor systemRedColor] : [NSColor textColor];
+		NSDictionary* attrs = @{ NSForegroundColorAttributeName: color,
+		                         NSFontAttributeName: (tv.font ?: [NSFont systemFontOfSize:11]) };
+		[tv.textStorage appendAttributedString:[[NSAttributedString alloc] initWithString:line attributes:attrs]];
 		[tv scrollRangeToVisible:NSMakeRange(tv.string.length, 0)];
 	}
 }
@@ -1070,7 +1086,11 @@ void FTPWindowController::ActionChmod() {
 	m_session->Chmod(path.c_str(), mode.c_str());
 	m_session->GetDirectory(parent.c_str());
 }
-void FTPWindowController::ActionMessagesToggle() {}
+void FTPWindowController::ActionMessagesToggle() {
+	m_outputVisible = !m_outputVisible;
+	if (m_outputHandle)
+		hostMsg(m_outputVisible ? NPPM_DMM_SHOWPANEL : NPPM_DMM_HIDEPANEL, (uintptr_t)m_outputHandle, 0);
+}
 
 void FTPWindowController::OnTreeExpand(FileObject* fo) {
 	if (m_session && m_session->IsConnected() && fo && fo->isDir())
