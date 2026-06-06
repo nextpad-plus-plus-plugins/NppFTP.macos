@@ -56,6 +56,7 @@ public:
 	void  ActionDisconnect();
 	void  ActionRefresh();
 	void  ActionAbort();
+	void  ActionGotoFolder();   // toolbar: navigate to a typed remote path
 	void  ActionDownloadSelected();
 	void  ActionUploadCurrent();
 	void  ActionGlobalSettings();

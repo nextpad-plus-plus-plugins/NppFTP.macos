@@ -112,7 +112,8 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 - (NSInteger)outlineView:(NSOutlineView*)ov numberOfChildrenOfItem:(id)item {
 	FTPWindowController* c = self.ctrl;
 	if (c->RootObject()) {  // connected
-		FileObject* fo = item ? (FileObject*)[(NSValue*)item pointerValue] : c->RootObject();
+		if (!item) return 1;   // the "/" root row (so the user can browse up to root)
+		FileObject* fo = (FileObject*)[(NSValue*)item pointerValue];
 		return fo ? fo->GetChildCount() : 0;
 	}
 	ProfileNode* root = (ProfileNode*)c->ProfileTree();
@@ -130,7 +131,8 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 - (id)outlineView:(NSOutlineView*)ov child:(NSInteger)index ofItem:(id)item {
 	FTPWindowController* c = self.ctrl;
 	if (c->RootObject()) {
-		FileObject* parent = item ? (FileObject*)[(NSValue*)item pointerValue] : c->RootObject();
+		if (!item) return [NSValue valueWithPointer:c->RootObject()];   // the "/" root
+		FileObject* parent = (FileObject*)[(NSValue*)item pointerValue];
 		return [NSValue valueWithPointer:parent->GetChild((int)index)];
 	}
 	if (!item) return [NSValue valueWithPointer:c->ProfileTree()];   // root node
@@ -164,6 +166,7 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 	if (c->RootObject()) {                       // connected remote tree
 		FileObject* fo = (FileObject*)[(NSValue*)item pointerValue];
 		name = fo ? nsutf8(fo->GetName()) : @"";
+		if (fo == c->RootObject() || name.length == 0) name = @"/";   // the remote root
 		icon = (fo && fo->isDir()) ? [NSImage imageNamed:NSImageNameFolder]
 		                           : [[NSWorkspace sharedWorkspace] iconForFileType:name.pathExtension ?: @""];
 	} else {                                     // disconnected profile tree
@@ -205,6 +208,7 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 - (void)tbUpload:(id)s     { self.ctrl->ActionUploadCurrent(); }
 - (void)tbRefresh:(id)s    { self.ctrl->ActionRefresh(); }
 - (void)tbAbort:(id)s      { self.ctrl->ActionAbort(); }
+- (void)tbGoto:(id)s       { self.ctrl->ActionGotoFolder(); }
 - (void)tbSettings:(id)sender { self.ctrl->ActionGlobalSettings(); }   // gear → Global settings
 - (void)tbMessages:(id)s   { self.ctrl->ActionMessagesToggle(); }
 
@@ -330,22 +334,24 @@ FileObject* FTPWindowController::RootObject() {
 int FTPWindowController::Create(void*, void*, int, int) {
 	@autoreleasepool {
 		NSView* panel = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 600)];
+		panel.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;   // host stretches us
 		NppFTPBridge* bridge = [[NppFTPBridge alloc] init];
 		bridge.ctrl = this;
 		m_bridge = (void*)CFBridgingRetain(bridge);
 
-		// toolbar row
-		NSView* tb = [[NSView alloc] initWithFrame:NSMakeRect(0, 572, 320, 28)];
-		tb.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+		// ── toolbar (fixed-height strip; buttons frame-laid within it) ──
+		NSView* tb = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 32)];
+		tb.translatesAutoresizingMaskIntoConstraints = NO;
 		struct { const char* tip; const char* sym; SEL a; bool needsConn; } btns[] = {
-			{"Connect",    "bolt.horizontal.circle", @selector(tbConnect:),    false},
-			{"Disconnect", "xmark.circle",           @selector(tbDisconnect:), true},
-			{"Download",   "arrow.down.circle",      @selector(tbDownload:),   true},
-			{"Upload",     "arrow.up.circle",        @selector(tbUpload:),     true},
-			{"Refresh",    "arrow.clockwise",        @selector(tbRefresh:),    true},
-			{"Abort",      "stop.circle",            @selector(tbAbort:),      true},
-			{"Settings",   "gearshape",              @selector(tbSettings:),   false},
-			{"Messages",   "text.bubble",            @selector(tbMessages:),   false},
+			{"Connect",        "link",                  @selector(tbConnect:),    false},
+			{"Disconnect",     "xmark.circle",          @selector(tbDisconnect:), true},
+			{"Go to folder…",  "arrow.right.to.line",   @selector(tbGoto:),       true},
+			{"Download",       "arrow.down.circle",     @selector(tbDownload:),   true},
+			{"Upload",         "arrow.up.circle",       @selector(tbUpload:),     true},
+			{"Refresh",        "arrow.clockwise",       @selector(tbRefresh:),    true},
+			{"Abort",          "stop.circle",           @selector(tbAbort:),      true},
+			{"Settings",       "gearshape",             @selector(tbSettings:),   false},
+			{"Messages",       "list.bullet.rectangle", @selector(tbMessages:),   false},
 		};
 		CGFloat x = 6;
 		for (auto& b : btns) {
@@ -357,17 +363,19 @@ int FTPWindowController::Create(void*, void*, int, int) {
 			btn.bezelStyle = NSBezelStyleRegularSquare; btn.bordered = NO;
 			btn.toolTip = [NSString stringWithUTF8String:b.tip];
 			btn.tag = b.needsConn ? 1 : 0;   // 1 = disabled while disconnected
-			btn.frame = NSMakeRect(x, 2, 28, 24);
+			btn.frame = NSMakeRect(x, 4, 28, 24);
 			[tb addSubview:btn]; x += 30;
 		}
 		m_toolbar = (void*)CFBridgingRetain(tb);
 		[panel addSubview:tb];
 
-		// remote tree (taller now that the Output lives in its own panel)
-		NSScrollView* treeScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 110, 320, 460)];
-		treeScroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-		treeScroll.hasVerticalScroller = YES; treeScroll.borderType = NSBezelBorder;
-		NSOutlineView* outline = [[NSOutlineView alloc] initWithFrame:treeScroll.bounds];
+		// ── remote tree ──
+		NSScrollView* treeScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+		treeScroll.translatesAutoresizingMaskIntoConstraints = NO;
+		treeScroll.hasVerticalScroller = YES; treeScroll.hasHorizontalScroller = YES;
+		treeScroll.autohidesScrollers = YES; treeScroll.scrollerStyle = NSScrollerStyleOverlay;
+		treeScroll.borderType = NSNoBorder; treeScroll.drawsBackground = NO;
+		NSOutlineView* outline = [[NSOutlineView alloc] initWithFrame:NSMakeRect(0,0,320,400)];
 		NSTableColumn* col = [[NSTableColumn alloc] initWithIdentifier:@"name"];
 		col.title = @"Remote";
 		[outline addTableColumn:col]; outline.outlineTableColumn = col;
@@ -381,11 +389,12 @@ int FTPWindowController::Create(void*, void*, int, int) {
 		[panel addSubview:treeScroll];
 		m_outline = (void*)CFBridgingRetain(outline);
 
-		// transfer queue
-		NSScrollView* qScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 110, 320, 108)];
-		qScroll.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
-		qScroll.hasVerticalScroller = YES; qScroll.borderType = NSBezelBorder;
-		NSTableView* qtable = [[NSTableView alloc] initWithFrame:qScroll.bounds];
+		// ── transfer queue ──
+		NSScrollView* qScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+		qScroll.translatesAutoresizingMaskIntoConstraints = NO;
+		qScroll.hasVerticalScroller = YES; qScroll.autohidesScrollers = YES;
+		qScroll.scrollerStyle = NSScrollerStyleOverlay; qScroll.borderType = NSNoBorder;
+		NSTableView* qtable = [[NSTableView alloc] initWithFrame:NSMakeRect(0,0,320,108)];
 		for (NSString* c in @[@"Action", @"Progress", @"File"]) {
 			NSTableColumn* tc = [[NSTableColumn alloc] initWithIdentifier:c]; tc.title = c;
 			[qtable addTableColumn:tc];
@@ -395,6 +404,23 @@ int FTPWindowController::Create(void*, void*, int, int) {
 		[panel addSubview:qScroll];
 		m_queueTable = (void*)CFBridgingRetain(qtable);
 
+		// ── Auto Layout: toolbar(top, 32) · tree(fills) · queue(bottom, 110) —
+		//    fills the whole docked panel with no dead grey space. ──
+		[NSLayoutConstraint activateConstraints:@[
+			[tb.topAnchor constraintEqualToAnchor:panel.topAnchor],
+			[tb.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor],
+			[tb.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor],
+			[tb.heightAnchor constraintEqualToConstant:32],
+			[treeScroll.topAnchor constraintEqualToAnchor:tb.bottomAnchor],
+			[treeScroll.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor],
+			[treeScroll.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor],
+			[treeScroll.bottomAnchor constraintEqualToAnchor:qScroll.topAnchor],
+			[qScroll.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor],
+			[qScroll.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor],
+			[qScroll.bottomAnchor constraintEqualToAnchor:panel.bottomAnchor],
+			[qScroll.heightAnchor constraintEqualToConstant:110],
+		]];
+
 		m_panelView = (void*)CFBridgingRetain(panel);
 
 		// ── separate "NppFTP - Output" dock panel (toggled by the Messages button,
@@ -402,7 +428,8 @@ int FTPWindowController::Create(void*, void*, int, int) {
 		NSView* outPanel = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 360, 220)];
 		NSScrollView* oScroll = [[NSScrollView alloc] initWithFrame:outPanel.bounds];
 		oScroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-		oScroll.hasVerticalScroller = YES; oScroll.borderType = NSNoBorder;
+		oScroll.hasVerticalScroller = YES; oScroll.autohidesScrollers = YES;
+		oScroll.scrollerStyle = NSScrollerStyleOverlay; oScroll.borderType = NSNoBorder;
 		NSTextView* tv = [[NSTextView alloc] initWithFrame:oScroll.bounds];
 		tv.editable = NO; tv.font = [NSFont fontWithName:@"Menlo" size:11] ?: [NSFont systemFontOfSize:11];
 		tv.minSize = NSMakeSize(0, 0); tv.maxSize = NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX);
@@ -473,8 +500,17 @@ void FTPWindowController::RebuildTree() {
 		m_treeConnectedMode = connected;
 		if (ov) {
 			[ov reloadData];
-			if (!connected && m_profileTree)   // show "Profiles" expanded by default
+			if (!connected && m_profileTree) {  // show "Profiles" expanded by default
 				[ov expandItem:[NSValue valueWithPointer:m_profileTree]];
+			} else if (connected && m_rootObj) {
+				// Expand the "/" root down the single-child chain to the initial
+				// remote dir, so the user lands on it but can still browse up to /.
+				FileObject* fo = m_rootObj;
+				for (int guard = 0; fo && guard < 64; guard++) {
+					[ov expandItem:[NSValue valueWithPointer:fo]];
+					if (fo->GetChildCount() == 1) fo = fo->GetChild(0); else break;
+				}
+			}
 		}
 	}
 	UpdateToolbarState();
@@ -803,6 +839,14 @@ void FTPWindowController::ActionAbort() {
 	if (!m_session || !m_session->IsConnected()) return;
 	m_session->AbortTransfer();
 	m_session->AbortOperation();
+}
+void FTPWindowController::ActionGotoFolder() {
+	if (!m_session || !m_session->IsConnected()) return;
+	std::string path;
+	if (PromptInput(nullptr, "Go to folder", "Remote path:", "/", false, path) != 1 || path.empty()) return;
+	// GetDirectoryHierarchy builds the intermediate folders so any absolute path
+	// becomes reachable/visible in the tree (matches the Windows "go to" dialog).
+	m_session->GetDirectoryHierarchy(path.c_str());
 }
 void FTPWindowController::ActionDownloadSelected() { if (m_selected) OnTreeActivate(m_selected); }
 void FTPWindowController::ActionUploadCurrent() {
