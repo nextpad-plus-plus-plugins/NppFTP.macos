@@ -323,6 +323,11 @@ TCHAR* FTPCache::ExpandPath(const TCHAR * path) {
 	tstring port = std::to_string(m_activePort);
 	replacestring = SU::ReplaceString(replacestring, TEXT("%PORT%"), port);
 
+	// The default cache template uses Windows '\' separators (and old saved
+	// configs may too). On macOS '\' is a literal filename char, so normalise to
+	// POSIX '/' before qualifying — otherwise it becomes one weirdly-named dir.
+	replacestring = SU::ReplaceString(replacestring, TEXT("\\"), TEXT("/"));
+
 	TCHAR * expanded = new TCHAR[MAX_PATH];
 	BOOL res = PathSearchAndQualify(replacestring.c_str(), expanded, MAX_PATH);
 

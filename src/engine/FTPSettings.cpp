@@ -31,7 +31,7 @@ FTPSettings::FTPSettings() :
 	m_showOutput(false),
 	m_splitRatio(0.5)
 {
-	m_globalCachePath = SU::DupString(TEXT("%CONFIGDIR%\\Cache\\%USERNAME%@%HOSTNAME%"));
+	m_globalCachePath = SU::DupString(TEXT("%CONFIGDIR%/Cache/%USERNAME%@%HOSTNAME%"));
 
 	PathMap globalPathmap{};
 	globalPathmap.localpath = SU::DupString(m_globalCachePath);
@@ -51,7 +51,7 @@ const TCHAR* FTPSettings::GetGlobalCachePath() const {
 
 int FTPSettings::SetGlobalCachePath(const TCHAR * path) {
 	if (!path || lstrlen(path) < 4) {	//must at least have a drive designator or network name
-		path = TEXT("%CONFIGDIR%\\Cache\\%USERNAME%@%HOSTNAME%\\%PORT%");
+		path = TEXT("%CONFIGDIR%/Cache/%USERNAME%@%HOSTNAME%/%PORT%");
 	}
 
 	PathMap globalPathmap{};

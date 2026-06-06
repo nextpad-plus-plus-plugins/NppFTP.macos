@@ -403,7 +403,10 @@ static NSString* sutf8(const char* s) { return [NSString stringWithUTF8String:s 
 	NSView* v = self.window.contentView;
 	mkLabel(v, @"Global cache:", 16, 224, 120);
 	self.edCache = mkEdit(v, 16, 202, 360, NO);
-	self.edCache.stringValue = sutf8(_settings->GetGlobalCachePath());
+	// Show POSIX '/' separators (the Windows default template uses '\'); saving
+	// then migrates the stored value to forward slashes.
+	self.edCache.stringValue = [sutf8(_settings->GetGlobalCachePath())
+	                            stringByReplacingOccurrencesOfString:@"\\" withString:@"/"];
 	self.ckClear = mkCheck(v, @"Clear ENTIRE cache on disconnect (use with care!)", 16, 172, 400);
 	self.ckClear.state = _settings->GetClearCache() ? NSControlStateValueOn : NSControlStateValueOff;
 	self.ckNoRecycle = mkCheck(v, @"Do not use the recycle bin (delete permanently)", 32, 150, 400);
