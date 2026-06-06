@@ -133,6 +133,12 @@ static int StartNppFTP() {
 	g_session    = new FTPSession();
 	g_output.controller = g_controller;
 
+	// Register the controller as the engine's UI provider — WITHOUT this every
+	// engine prompt (host-key trust, password, passphrase, keyboard-interactive)
+	// silently returns its default: the SSH host-key MessageBox returns IDNO, so
+	// connections fail with "[SFTP] Rejected host key" and no prompt ever shows.
+	SetUIProvider(g_controller);
+
 	if (g_controller->Create((void*)nppData._nppHandle, (void*)nppData._nppHandle, 0, funcItem[0]._cmdID) == -1)
 		return -1;
 	if (g_session->Init(g_controller, g_settings) == -1) { g_controller->Destroy(); return -1; }
