@@ -63,14 +63,18 @@ static FTPSettings*         g_settings   = nullptr;
 static vProfile             g_profiles;
 static vX509                g_certificates;
 static bool                 g_started    = false;
-static std::string          g_configDir;    // ~/.nextpad++/plugins/Config/NppFTP
+static std::string          g_configDir;    // <NPPM_GETPLUGINSCONFIGDIR>/NppFTP
 
 static std::string pluginsConfigDir() {
 	char buf[2048]; buf[0] = '\0';
 	nppData._sendMessage(nppData._nppHandle, NPPM_GETPLUGINSCONFIGDIR, sizeof(buf), (intptr_t)buf);
 	if (buf[0] != '\0') return std::string(buf);
 	@autoreleasepool {
-		NSString* dir = [NSHomeDirectory() stringByAppendingPathComponent:@".nextpad++/plugins/Config"];
+		// Fallback only if the host returns empty (it does not on shipped versions):
+		// the app-support base, NOT a legacy ~/.nextpad++ dot-folder.
+		NSString* dir = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory,
+		                     NSUserDomainMask, YES).firstObject
+		                     stringByAppendingPathComponent:@"Nextpad++/plugins/Config"];
 		return std::string([dir UTF8String]);
 	}
 }

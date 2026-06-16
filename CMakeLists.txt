@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(NppFTP LANGUAGES CXX OBJCXX)
+project(NppFTP VERSION 1.0.0 LANGUAGES CXX OBJCXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -55,6 +55,8 @@ target_link_libraries(NppFTP PRIVATE
 
 set_target_properties(NppFTP PROPERTIES
     PREFIX "" SUFFIX ".dylib" OUTPUT_NAME "NppFTP")
+# Stamp version into the dylib Mach-O current_version (Plugins Admin reads it).
+target_link_options(NppFTP PRIVATE "-Wl,-current_version,${PROJECT_VERSION}")
 
-set(PLUGIN_INSTALL_DIR "$ENV{HOME}/.nextpad++/plugins/NppFTP")
+set(PLUGIN_INSTALL_DIR "$ENV{HOME}/Library/Application Support/Nextpad++/plugins/NppFTP")
 install(TARGETS NppFTP DESTINATION "${PLUGIN_INSTALL_DIR}")
