@@ -29,7 +29,7 @@ set(SHIM "${NPPFTP}/src/mac/win_compat.cpp")
 file(GLOB UI_SOURCES   "${NPPFTP}/src/ui/*.mm")
 set(MAC_FS "${NPPFTP}/src/mac/mac_fs.mm")
 
-add_library(NppFTP MODULE
+add_library(NppFTP SHARED
     ${ENGINE_CORE} ${ENGINE_UTCP} ${TINYXML} ${SHIM}
     ${UI_SOURCES} ${MAC_FS})
 
