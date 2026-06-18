@@ -1,6 +1,7 @@
 # Build output
 build/
 build-*/
+docs/
 *.o
 *.dylib
 .DS_Store
