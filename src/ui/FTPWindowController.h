@@ -18,6 +18,8 @@
 #include "FTPProfile.h"
 #include "FTPSettings.h"
 #include "QueueOperation.h"
+#include <map>
+#include <set>
 
 // Forward-declared host accessor (provided by the plugin entry).
 struct NppData;
@@ -58,6 +60,7 @@ public:
 	void  ActionAbort();
 	void  ActionGotoFolder();   // toolbar: navigate to a typed remote path
 	void  ActionDownloadSelected();
+	void  ActionDownloadFolder();   // recursively download the selected remote dir to a chosen local folder
 	void  ActionUploadCurrent();
 	void  ActionGlobalSettings();
 	void  ActionMessagesToggle();
@@ -83,6 +86,7 @@ public:
 
 	// ── context-menu file operations (target = SetContextTarget) ────────────
 	void  SetContextTarget(FileObject* fo) { m_selected = fo; }
+	void  SetSelected(FileObject* fo) { m_selected = fo; }   // tree single-click selection → toolbar target
 	void  ActionRefreshDir();
 	void  ActionUploadTo();
 	void  ActionMkDir();
@@ -92,6 +96,14 @@ public:
 	void  ActionRename();
 	void  ActionDelete();
 	void  ActionChmod();
+	// remote-file clipboard: Copy (files), Cut (files/folders), Paste into a dir.
+	void  ActionRemoteCopy();
+	void  ActionRemoteCut();
+	void  ActionRemotePaste();
+	bool  RemoteClipboardActive() const { return !m_clipRemotePath.empty(); }
+	bool  SelectedIsConnectableProfile();   // disconnected tree: a profile leaf is selected
+	void  NavigateTowardTarget();           // after connect, expand/list down to the initial remote dir
+	void  UpdateToolbarState();             // enable/disable connection-requiring buttons + connect toggle
 
 	// accessors for the ObjC data sources
 	FTPSession* Session()   { return m_session; }
@@ -108,7 +120,6 @@ private:
 	void  RebuildTree();
 	void  RefreshQueue();
 	bool  profileInList(FTPProfile* p);   // validate a context profile pointer
-	void  UpdateToolbarState();   // enable/disable connection-requiring buttons
 	// engine-event handlers (ported from FTPWindow::OnConnect/OnDisconnect/OnDirectoryRefresh)
 	void  OnConnect(int code);
 	void  OnDisconnect();
@@ -141,6 +152,15 @@ private:
 	FTPProfile*     m_clipProfile;     // clipboard: a profile (cut/copy)
 	std::string     m_clipFolderPath;  // clipboard: a folder path (cut/copy)
 	bool            m_clipIsCut;       // true = cut (move), false = copy
+	std::map<std::string,std::string> m_folderDlMap;   // recursive folder download: remote dir → local dir (pending listings)
+	std::set<std::string>             m_folderDlSeen;   // dirs already queued this download (dedup + cycle guard)
+	std::string     m_clipRemotePath;  // remote-file clipboard: source path (cut/copy)
+	std::string     m_clipRemoteName;  // ...its leaf name (used to build the paste destination)
+	bool            m_clipRemoteIsCut = false;  // true = cut (move via rename), false = copy (download+upload)
+	bool            m_clipRemoteIsDir = false;  // the clipped item is a directory
+	std::string     m_copyDestDir;     // pending paste-copy: dir to upload the temp download into (code 3)
+	std::string     m_navTarget;       // post-connect: remote dir to navigate/expand to (initial dir)
+	int             m_navAttempts = 0; // safety bound on the navigation descent
 	bool            m_visible;
 	std::vector<ActiveOp> m_activeOps;   // in-flight transfer queue
 };

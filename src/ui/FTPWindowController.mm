@@ -201,6 +201,23 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 	if (n && !n->isFolder && n->profile) c->ActionConnectProfile(n->profile);
 }
 
+// Track the current tree selection so the toolbar Download/Upload buttons (which
+// act on the selected remote object) work on a single click — previously
+// m_selected only updated on double-click or right-click, so the toolbar buttons
+// appeared to do nothing.
+- (void)outlineViewSelectionDidChange:(NSNotification*)note {
+	FTPWindowController* c = self.ctrl;
+	if (c->RootObject()) {   // connected: track the selected remote object for the toolbar
+		NSInteger row = self.outline.selectedRow;
+		FileObject* fo = (row >= 0)
+			? (FileObject*)[(NSValue*)[self.outline itemAtRow:row] pointerValue]
+			: nullptr;
+		c->SetSelected(fo);
+	}
+	// Re-evaluate the toolbar (disconnected: Connect enables only with a profile selected).
+	c->UpdateToolbarState();
+}
+
 // toolbar actions
 - (void)tbConnect:(id)s    { self.ctrl->ActionConnectSelected(); }
 - (void)tbDisconnect:(id)s { self.ctrl->ActionDisconnect(); }
@@ -266,13 +283,22 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 	if (!fo) fo = root;
 	c->SetContextTarget(fo);
 	if (fo->isDir()) {
+		[self addItem:menu title:@"Download folder…" sel:@selector(ctxDownloadFolder:)];
+		[menu addItem:[NSMenuItem separatorItem]];
 		[self addItem:menu title:@"Refresh" sel:@selector(ctxRefresh:)];
 		[self addItem:menu title:@"Upload file here…" sel:@selector(ctxUpload:)];
 		[self addItem:menu title:@"New directory…" sel:@selector(ctxMkdir:)];
 		[self addItem:menu title:@"New file…" sel:@selector(ctxMkfile:)];
+		[menu addItem:[NSMenuItem separatorItem]];
+		[self addItem:menu title:@"Cut Folder" sel:@selector(ctxRemoteCut:)];
+		NSMenuItem* pasteItem = [self addItem:menu title:@"Paste" sel:@selector(ctxRemotePaste:)];
+		pasteItem.enabled = c->RemoteClipboardActive();
 	} else {
 		[self addItem:menu title:@"Download && open" sel:@selector(ctxDownloadOpen:)];
 		[self addItem:menu title:@"Download to…" sel:@selector(ctxDownloadTo:)];
+		[menu addItem:[NSMenuItem separatorItem]];
+		[self addItem:menu title:@"Copy File" sel:@selector(ctxRemoteCopy:)];
+		[self addItem:menu title:@"Cut File" sel:@selector(ctxRemoteCut:)];
 	}
 	[menu addItem:[NSMenuItem separatorItem]];
 	[self addItem:menu title:@"Rename…" sel:@selector(ctxRename:)];
@@ -295,10 +321,14 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 - (void)ctxMkdir:(id)s        { self.ctrl->ActionMkDir(); }
 - (void)ctxMkfile:(id)s       { self.ctrl->ActionMkFile(); }
 - (void)ctxDownloadOpen:(id)s { self.ctrl->ActionDownloadOpen(); }
+- (void)ctxDownloadFolder:(id)s { self.ctrl->ActionDownloadFolder(); }
 - (void)ctxDownloadTo:(id)s   { self.ctrl->ActionDownloadTo(); }
 - (void)ctxRename:(id)s       { self.ctrl->ActionRename(); }
 - (void)ctxDelete:(id)s       { self.ctrl->ActionDelete(); }
 - (void)ctxChmod:(id)s        { self.ctrl->ActionChmod(); }
+- (void)ctxRemoteCopy:(id)s   { self.ctrl->ActionRemoteCopy(); }
+- (void)ctxRemoteCut:(id)s    { self.ctrl->ActionRemoteCut(); }
+- (void)ctxRemotePaste:(id)s  { self.ctrl->ActionRemotePaste(); }
 
 // queue table (one row per in-flight operation)
 - (NSInteger)numberOfRowsInTableView:(NSTableView*)t { return (NSInteger)self.ctrl->QueueCount(); }
@@ -310,6 +340,57 @@ static intptr_t hostMsg(uint32_t msg, uintptr_t w, intptr_t l) {
 	return [NSString stringWithUTF8String:a->file.c_str()];
 }
 @end
+
+// Toolbar connect/disconnect glyph: the SF "link" chain, optionally with small
+// beams radiating from its ends (the Disconnect state, suggesting a snap). Both
+// states are drawn at the same fixed size so the chain doesn't change size when
+// toggling. Template image so contentTintColor (blue for Connect, pink for
+// Disconnect) applies — SF Symbols has no broken-link glyph of its own.
+static NSImage* linkToggleImage(BOOL withBeams) {
+	NSImage* img = [NSImage imageWithSize:NSMakeSize(22, 22) flipped:NO drawingHandler:^BOOL(NSRect rect){
+		CGFloat W = rect.size.width, H = rect.size.height, cx = W/2, cy = H/2;
+		NSImage* link = [[NSImage imageWithSystemSymbolName:@"link" accessibilityDescription:nil]
+			imageWithSymbolConfiguration:[NSImageSymbolConfiguration configurationWithPointSize:14
+			                                                                            weight:NSFontWeightRegular]];
+		NSSize ls = link.size;
+		[link drawInRect:NSMakeRect((W - ls.width)/2, (H - ls.height)/2, ls.width, ls.height)
+		        fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0];
+		if (withBeams) {
+			[[NSColor blackColor] setStroke];
+			NSBezierPath* b = [NSBezierPath bezierPath];
+			b.lineWidth = W * 0.055; b.lineCapStyle = NSLineCapStyleRound;
+			const CGFloat angs[] = { 120, 150, 180, 300, 330, 0 };   // two clusters at the chain's ends
+			CGFloat r0 = W * 0.40, r1 = W * 0.50;
+			for (int i = 0; i < 6; i++) {
+				CGFloat a = angs[i] * (CGFloat)M_PI / 180.0;
+				[b moveToPoint:NSMakePoint(cx + cos(a)*r0, cy + sin(a)*r0)];
+				[b lineToPoint:NSMakePoint(cx + cos(a)*r1, cy + sin(a)*r1)];
+			}
+			[b stroke];
+		}
+		return YES;
+	}];
+	[img setTemplate:YES];   // 'img.template' won't parse — 'template' is a C++ keyword
+	return img;
+}
+
+// Configure the single Connect/Disconnect toolbar toggle: SF "link" (chain) in
+// blue when disconnected (click = Connect), and a custom broken chain in pink
+// when connected (click = Disconnect).
+static void configureConnectToggle(NSButton* btn, BOOL connected, BOOL canConnect, id target) {
+	NSImage* img = linkToggleImage(connected);   // chain; beams added in the connected (Disconnect) state
+	if (img) { btn.image = img; btn.imagePosition = NSImageOnly; }
+	else     { btn.title = connected ? @"Disconnect" : @"Connect"; btn.font = [NSFont systemFontOfSize:9]; }
+	btn.contentTintColor = connected ? [NSColor systemPinkColor] : [NSColor systemBlueColor];
+	btn.toolTip = connected ? @"Disconnect"
+	                        : (canConnect ? @"Connect" : @"Connect (select a profile first)");
+	btn.target  = target;
+	btn.action  = connected ? @selector(tbDisconnect:) : @selector(tbConnect:);
+	// Disconnected: only enable Connect once a profile is selected — prevents an
+	// accidental connect-with-no-selection (which connected to an arbitrary profile
+	// and could hang). Disabled makes the blue link dim automatically.
+	btn.enabled = connected ? YES : canConnect;
+}
 
 // ─────────────────────────── controller impl ───────────────────────────────
 FTPWindowController::FTPWindowController(const NppData* npp)
@@ -342,9 +423,18 @@ int FTPWindowController::Create(void*, void*, int, int) {
 		// ── toolbar (fixed-height strip; buttons frame-laid within it) ──
 		NSView* tb = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 32)];
 		tb.translatesAutoresizingMaskIntoConstraints = NO;
+		CGFloat x = 6;
+
+		// ── single Connect/Disconnect toggle: powerplug, blue=connect / pink=disconnect ──
+		// tag 2 → UpdateToolbarState() swaps its tint, tooltip and action by connection state.
+		NSButton* connBtn = [NSButton buttonWithTitle:@"" target:bridge action:@selector(tbConnect:)];
+		connBtn.bezelStyle = NSBezelStyleRegularSquare; connBtn.bordered = NO;
+		connBtn.tag = 2;
+		connBtn.frame = NSMakeRect(x, 4, 28, 24);
+		configureConnectToggle(connBtn, NO, NO, bridge);   // initial: disconnected, no profile selected → disabled
+		[tb addSubview:connBtn]; x += 30;
+
 		struct { const char* tip; const char* sym; SEL a; bool needsConn; } btns[] = {
-			{"Connect",        "link",                  @selector(tbConnect:),    false},
-			{"Disconnect",     "xmark.circle",          @selector(tbDisconnect:), true},
 			{"Go to folder…",  "arrow.right.to.line",   @selector(tbGoto:),       true},
 			{"Download",       "arrow.down.circle",     @selector(tbDownload:),   true},
 			{"Upload",         "arrow.up.circle",       @selector(tbUpload:),     true},
@@ -353,7 +443,6 @@ int FTPWindowController::Create(void*, void*, int, int) {
 			{"Settings",       "gearshape",             @selector(tbSettings:),   false},
 			{"Messages",       "list.bullet.rectangle", @selector(tbMessages:),   false},
 		};
-		CGFloat x = 6;
 		for (auto& b : btns) {
 			NSButton* btn = [NSButton buttonWithTitle:@"" target:bridge action:b.a];
 			NSImage* img = [NSImage imageWithSystemSymbolName:[NSString stringWithUTF8String:b.sym]
@@ -395,10 +484,13 @@ int FTPWindowController::Create(void*, void*, int, int) {
 		qScroll.hasVerticalScroller = YES; qScroll.autohidesScrollers = YES;
 		qScroll.scrollerStyle = NSScrollerStyleOverlay; qScroll.borderType = NSNoBorder;
 		NSTableView* qtable = [[NSTableView alloc] initWithFrame:NSMakeRect(0,0,320,108)];
+		NSFont* qFont = [NSFont systemFontOfSize:10];   // smaller than the default (~13)
 		for (NSString* c in @[@"Action", @"Progress", @"File"]) {
 			NSTableColumn* tc = [[NSTableColumn alloc] initWithIdentifier:c]; tc.title = c;
+			[(NSCell*)tc.dataCell setFont:qFont];
 			[qtable addTableColumn:tc];
 		}
+		qtable.rowHeight = 14;
 		qtable.dataSource = bridge;
 		qScroll.documentView = qtable;
 		[panel addSubview:qScroll];
@@ -431,7 +523,7 @@ int FTPWindowController::Create(void*, void*, int, int) {
 		oScroll.hasVerticalScroller = YES; oScroll.autohidesScrollers = YES;
 		oScroll.scrollerStyle = NSScrollerStyleOverlay; oScroll.borderType = NSNoBorder;
 		NSTextView* tv = [[NSTextView alloc] initWithFrame:oScroll.bounds];
-		tv.editable = NO; tv.font = [NSFont fontWithName:@"Menlo" size:11] ?: [NSFont systemFontOfSize:11];
+		tv.editable = NO; tv.font = [NSFont fontWithName:@"Menlo" size:9] ?: [NSFont systemFontOfSize:9];
 		tv.minSize = NSMakeSize(0, 0); tv.maxSize = NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX);
 		tv.verticallyResizable = YES; tv.horizontallyResizable = NO;
 		tv.autoresizingMask = NSViewWidthSizable;
@@ -476,7 +568,17 @@ int FTPWindowController::Focus() {
 bool FTPWindowController::IsVisible() { return m_visible; }
 void* FTPWindowController::GetHWND() { return (void*)(Notifier*)this; }
 
-int FTPWindowController::OnActivateLocalFile(const char*) { return 0; }
+int FTPWindowController::OnActivateLocalFile(const char* path) {
+	// Upload-on-save (the download → edit → save → re-upload round trip). The host
+	// calls this on NPPN_FILESAVED for every saved buffer; UploadFileCache maps the
+	// local path back to its remote path via the cache and uploads it. If the saved
+	// file isn't under our download cache it returns "no match" and we do nothing,
+	// so ordinary (non-FTP) saves are unaffected. Only meaningful while connected.
+	if (!path || !m_session || !m_session->IsConnected())
+		return 0;
+	m_session->UploadFileCache(path);
+	return 0;
+}
 
 void FTPWindowController::RebuildTree() {
 	bool connected = (RootObject() != nullptr);
@@ -503,13 +605,10 @@ void FTPWindowController::RebuildTree() {
 			if (!connected && m_profileTree) {  // show "Profiles" expanded by default
 				[ov expandItem:[NSValue valueWithPointer:m_profileTree]];
 			} else if (connected && m_rootObj) {
-				// Expand the "/" root down the single-child chain to the initial
-				// remote dir, so the user lands on it but can still browse up to /.
-				FileObject* fo = m_rootObj;
-				for (int guard = 0; fo && guard < 64; guard++) {
-					[ov expandItem:[NSValue valueWithPointer:fo]];
-					if (fo->GetChildCount() == 1) fo = fo->GetChild(0); else break;
-				}
+				// Open the root; the deep descent to the profile's initial remote dir
+				// is driven by NavigateTowardTarget() (which lists each level), since
+				// expanding a dir re-lists it and would otherwise break a naive walk.
+				[ov expandItem:[NSValue valueWithPointer:m_rootObj]];
 			}
 		}
 	}
@@ -524,14 +623,73 @@ bool FTPWindowController::profileInList(FTPProfile* p) {
 	return false;
 }
 
+// Expand/scroll the tree down to m_navTarget (the profile's initial remote dir),
+// listing each level as needed. Called after connect and again as each level's
+// listing arrives (OnDirectoryRefresh), because expanding a dir re-lists it — a
+// naive one-shot walk down the chain breaks once "/" gets its full listing.
+void FTPWindowController::NavigateTowardTarget() {
+	if (m_navTarget.empty() || !m_rootObj) return;
+	@autoreleasepool {
+		NSOutlineView* ov = (__bridge NSOutlineView*)m_outline;
+		if (!ov) return;
+		if (++m_navAttempts > 64) { m_navTarget.clear(); return; }   // safety: never loop forever
+
+		[ov expandItem:[NSValue valueWithPointer:m_rootObj]];
+
+		std::string target   = m_navTarget;
+		std::string rootPath = m_rootObj->GetPath() ? m_rootObj->GetPath() : "/";
+		FileObject* fo = m_rootObj;
+
+		if (target != rootPath) {
+			size_t pos = (rootPath == "/") ? 1 : rootPath.size() + 1;
+			while (pos <= target.size()) {
+				size_t slash = target.find('/', pos);
+				std::string comp = target.substr(pos, (slash == std::string::npos ? target.size() : slash) - pos);
+				if (comp.empty()) break;
+				FileObject* child = fo->GetChildByName(comp.c_str());
+				if (!child) {
+					// This level isn't listed yet → list it; resume on its refresh.
+					if (m_session) m_session->GetDirectory(fo->GetPath());
+					return;
+				}
+				[ov expandItem:[NSValue valueWithPointer:child]];
+				fo = child;
+				if (slash == std::string::npos) break;
+				pos = slash + 1;
+			}
+		}
+
+		NSInteger row = [ov rowForItem:[NSValue valueWithPointer:fo]];
+		if (row >= 0) [ov scrollRowToVisible:row];
+	}
+}
+
+// True when the disconnected profile tree has a connectable profile leaf selected
+// (used to enable the Connect toolbar button).
+bool FTPWindowController::SelectedIsConnectableProfile() {
+	@autoreleasepool {
+		NSOutlineView* ov = (__bridge NSOutlineView*)m_outline;
+		if (!ov) return false;
+		NSInteger row = ov.selectedRow;
+		if (row < 0) return false;
+		ProfileNode* n = (ProfileNode*)[(NSValue*)[ov itemAtRow:row] pointerValue];
+		return (n && !n->isFolder && n->profile);
+	}
+}
+
 void FTPWindowController::UpdateToolbarState() {
 	@autoreleasepool {
 		NSView* tb = (__bridge NSView*)m_toolbar;
 		if (!tb) return;
 		BOOL connected = (m_session && m_session->IsConnected());
-		for (NSView* sv in tb.subviews)
-			if ([sv isKindOfClass:[NSButton class]] && sv.tag == 1)
-				((NSButton*)sv).enabled = connected;
+		BOOL canConnect = connected ? NO : SelectedIsConnectableProfile();
+		id bridge = (__bridge id)m_bridge;
+		for (NSView* sv in tb.subviews) {
+			if (![sv isKindOfClass:[NSButton class]]) continue;
+			NSButton* b = (NSButton*)sv;
+			if (b.tag == 1)      b.enabled = connected;                                    // ops: enabled only while connected
+			else if (b.tag == 2) configureConnectToggle(b, connected, canConnect, bridge); // the Connect/Disconnect toggle
+		}
 	}
 }
 
@@ -546,7 +704,7 @@ void FTPWindowController::AppendOutput(int type, const char* msg) {
 		NSString* line = [NSString stringWithFormat:@"%@  %s\n", ts, msg ? msg : ""];
 		NSColor* color = (type == 2 /*Output_Err*/) ? [NSColor systemRedColor] : [NSColor textColor];
 		NSDictionary* attrs = @{ NSForegroundColorAttributeName: color,
-		                         NSFontAttributeName: (tv.font ?: [NSFont systemFontOfSize:11]) };
+		                         NSFontAttributeName: (tv.font ?: [NSFont systemFontOfSize:9]) };
 		[tv.textStorage appendAttributedString:[[NSAttributedString alloc] initWithString:line attributes:attrs]];
 		[tv scrollRangeToVisible:NSMakeRange(tv.string.length, 0)];
 	}
@@ -686,12 +844,22 @@ void FTPWindowController::HandleNotification(int message, int code, QueueOperati
 					// Download to cache: open the local file in the host editor.
 					AppendOutput(0, "[NppFTP] Download succeeded, opening file.");
 					hostMsg(NPPM_DOOPEN, 0, (intptr_t)opdld->GetLocalPath());
-				} else {
+				} else if (code == 1) {
 					// Download to a chosen location: offer to open it.
 					int ret = MessageBox(nullptr, "The download is complete. Do you wish to open the file?",
 					                     "Download complete", MB_YESNO);
 					if (ret == IDYES)
 						hostMsg(NPPM_DOOPEN, 0, (intptr_t)opdld->GetLocalPath());
+				} else if (code == 3) {
+					// Remote copy: the temp download finished — upload it into the
+					// paste-target dir (UploadFile with targetIsDir keeps the name).
+					if (m_session && !m_copyDestDir.empty()) {
+						m_session->UploadFile(opdld->GetLocalPath(), m_copyDestDir.c_str(), true);
+						m_copyDestDir.clear();
+					}
+				} else {
+					// code 2: part of a recursive "Download folder" — silent (no open/prompt).
+					AppendOutput(0, (std::string("[NppFTP] Downloaded ") + opdld->GetLocalPath()).c_str());
 				}
 			} else {
 				AppendOutput(0, "[NppFTP] Download succeeded.");
@@ -721,18 +889,31 @@ void FTPWindowController::OnConnect(int code) {
 	// THE one and only GetRootObject() call (runs Cwd/Pwd + builds the root tree).
 	FileObject* root = m_session ? m_session->GetRootObject() : nullptr;
 	m_rootObj = root;                            // cache it for the cheap RootObject()
+	// Target the profile's initial remote dir (the deepest node GetRootObject
+	// pre-seeded from Cwd/Pwd) and navigate there by listing each level, so the
+	// tree lands inside it instead of just showing "/".
+	m_navTarget.clear();
+	m_navAttempts = 0;
+	if (root) {
+		FileObject* last = root;
+		while (last->GetChildCount() > 0) last = last->GetChild(0);
+		if (last && last != root && last->GetPath()) m_navTarget = last->GetPath();
+	}
 	RebuildTree();
 	if (!root) return;
-	// Walk to the deepest pre-seeded child (the profile's initial remote dir)
-	// and list it, matching FTPWindow::OnConnect.
-	FileObject* last = root;
-	while (last->GetChildCount() > 0) last = last->GetChild(0);
-	if (m_session) m_session->GetDirectory(last->GetPath());
+	if (!m_navTarget.empty())
+		NavigateTowardTarget();                     // expand/list down to the initial dir
+	else if (m_session)
+		m_session->GetDirectory(root->GetPath());   // no initial dir → just list root
 }
 
 void FTPWindowController::OnDisconnect() {
 	m_selected = nullptr;
 	m_rootObj  = nullptr;   // the session is tearing down its root tree; drop our ref
+	m_folderDlMap.clear();  // abandon any in-flight recursive folder download
+	m_folderDlSeen.clear();
+	m_clipRemotePath.clear();   // drop the remote-file clipboard / pending copy
+	m_copyDestDir.clear();
 	RebuildTree();          // RootObject() is now null → outline falls back to profiles
 }
 
@@ -747,7 +928,48 @@ void FTPWindowController::OnDirectoryRefresh(FileObject* parent, FTPFile* files,
 	for (int i = 0; i < count; i++)
 		parent->AddChild(new FileObject(files + i));
 	parent->Sort();
+
+	// Recursive "Download folder": if this directory's listing was requested as
+	// part of a folder download, download its files (silently, code 2) and recurse
+	// into its subdirectories as their listings arrive. m_folderDlSeen guards
+	// against symlink cycles and duplicate listings.
+	if (!m_folderDlMap.empty()) {
+		auto it = m_folderDlMap.find(parent->GetPath());
+		if (it != m_folderDlMap.end()) {
+			std::string localBase = it->second;
+			m_folderDlMap.erase(it);   // erase before queuing so we never reprocess this dir
+			NSFileManager* fm = [NSFileManager defaultManager];
+			for (int i = 0; i < parent->GetChildCount(); i++) {
+				FileObject* child = parent->GetChild(i);
+				if (!child) continue;
+				std::string name = child->GetName() ? child->GetName() : "";
+				if (name.empty() || name == "." || name == "..") continue;
+				std::string childLocal = localBase + "/" + name;
+				if (child->isDir()) {
+					std::string childRemote = child->GetPath();
+					if (m_folderDlSeen.insert(childRemote).second) {
+						[fm createDirectoryAtPath:[NSString stringWithUTF8String:childLocal.c_str()]
+						   withIntermediateDirectories:YES attributes:nil error:nil];
+						m_folderDlMap[childRemote] = childLocal;
+						m_session->GetDirectory(childRemote.c_str());
+					}
+				} else {
+					m_session->DownloadFile(child->GetPath(), childLocal.c_str(), false, 2);
+				}
+			}
+		}
+	}
+
 	RebuildTree();
+
+	// Drive the post-connect navigation to the profile's initial remote dir: each
+	// time a level's listing arrives, expand it and list the next level down. Clear
+	// the target once its own listing has arrived (it's now fully expanded/stable).
+	if (!m_navTarget.empty()) {
+		bool targetListed = (parent->GetPath() && m_navTarget == parent->GetPath());
+		NavigateTowardTarget();
+		if (targetListed) m_navTarget.clear();
+	}
 }
 
 void FTPWindowController::RefreshQueue() {
@@ -817,9 +1039,11 @@ void FTPWindowController::ActionConnectSelected() {
 		NSInteger row = ov.selectedRow;
 		if (row >= 0) {   // connect the selected profile leaf
 			ProfileNode* n = (ProfileNode*)[(NSValue*)[ov itemAtRow:row] pointerValue];
-			if (n && !n->isFolder && n->profile) { ActionConnectProfile(n->profile); return; }
+			if (n && !n->isFolder && n->profile) ActionConnectProfile(n->profile);
 		}
-		ActionConnectProfile(m_profiles->at(0));   // fall back to the first profile
+		// No fallback to the first profile: require an explicit selection (the
+		// Connect button is disabled until one is chosen). Avoids the hang from
+		// connecting to an arbitrary profile with nothing selected.
 	}
 }
 void FTPWindowController::ActionDisconnect() {
@@ -1101,6 +1325,29 @@ void FTPWindowController::ActionDownloadTo() {
 		m_session->DownloadFile(remote.c_str(), local.c_str(), false, 1);
 	}
 }
+void FTPWindowController::ActionDownloadFolder() {
+	if (!m_session || !m_selected || !m_selected->isDir()) return;
+	std::string remoteDir = m_selected->GetPath();
+	std::string dirName   = m_selected->GetName();
+	@autoreleasepool {
+		// A local-folder picker (like single-file download uses a save panel).
+		NSOpenPanel* p = [NSOpenPanel openPanel];
+		p.canChooseFiles = NO; p.canChooseDirectories = YES; p.allowsMultipleSelection = NO;
+		p.prompt  = @"Download Here";
+		p.message = [NSString stringWithFormat:@"Choose a local folder to download “%s” into:", dirName.c_str()];
+		if ([p runModal] != NSModalResponseOK) return;
+		std::string localBase = std::string(p.URL.path.UTF8String) + "/" + dirName;  // download INTO a subfolder named like the remote dir
+		[[NSFileManager defaultManager] createDirectoryAtPath:[NSString stringWithUTF8String:localBase.c_str()]
+		                          withIntermediateDirectories:YES attributes:nil error:nil];
+		// Start the recursive download. OnDirectoryRefresh downloads this dir's
+		// files and recurses into its subdirs as each listing arrives.
+		if (m_folderDlMap.empty()) m_folderDlSeen.clear();   // fresh download → reset cycle/dedup guard
+		m_folderDlSeen.insert(remoteDir);
+		m_folderDlMap[remoteDir] = localBase;
+		AppendOutput(0, (std::string("[NppFTP] Downloading folder ") + remoteDir + " -> " + localBase).c_str());
+		m_session->GetDirectory(remoteDir.c_str());
+	}
+}
 void FTPWindowController::ActionRename() {
 	if (!m_session || !m_selected) return;
 	std::string oldpath = m_selected->GetPath();
@@ -1129,6 +1376,52 @@ void FTPWindowController::ActionChmod() {
 	if (PromptInput(nullptr, "Permissions", "Octal mode (e.g. 644):", "644", false, mode) != 1 || mode.empty()) return;
 	m_session->Chmod(path.c_str(), mode.c_str());
 	m_session->GetDirectory(parent.c_str());
+}
+void FTPWindowController::ActionRemoteCopy() {
+	// Copy is files-only (matches Windows). Captures the source for a later Paste.
+	if (!m_session || !m_selected || m_selected->isDir()) return;
+	m_clipRemotePath  = m_selected->GetPath();
+	m_clipRemoteName  = m_selected->GetName() ? m_selected->GetName() : "";
+	m_clipRemoteIsCut = false;
+	m_clipRemoteIsDir = false;
+	AppendOutput(0, (std::string("[NppFTP] Copied ") + m_clipRemotePath).c_str());
+}
+void FTPWindowController::ActionRemoteCut() {
+	if (!m_session || !m_selected) return;
+	m_clipRemotePath  = m_selected->GetPath();
+	m_clipRemoteName  = m_selected->GetName() ? m_selected->GetName() : "";
+	m_clipRemoteIsCut = true;
+	m_clipRemoteIsDir = m_selected->isDir();
+	AppendOutput(0, (std::string("[NppFTP] Cut ") + m_clipRemotePath).c_str());
+}
+void FTPWindowController::ActionRemotePaste() {
+	// Paste into the right-clicked directory (m_selected).
+	if (!m_session || !m_selected || !m_selected->isDir() || m_clipRemotePath.empty() || m_clipRemoteName.empty())
+		return;
+	std::string destDir = m_selected->GetPath();
+	std::string dest    = ftpChildPath(destDir.c_str(), m_clipRemoteName);
+	if (dest == m_clipRemotePath) return;   // pasting onto itself → no-op
+
+	if (m_clipRemoteIsCut) {
+		// Move via a server-side rename (works for files and folders).
+		std::string srcParent = ftpParentPath(m_clipRemotePath.c_str());
+		m_session->Rename(m_clipRemotePath.c_str(), dest.c_str());
+		m_session->GetDirectory(destDir.c_str());
+		if (srcParent != destDir) m_session->GetDirectory(srcParent.c_str());
+		m_clipRemotePath.clear();   // cut is one-shot
+	} else {
+		// Copy a file: FTP/SFTP have no server-side copy, so download to a temp
+		// then upload it into the destination dir. code 3 → HandleNotification
+		// uploads the finished temp into m_copyDestDir.
+		@autoreleasepool {
+			NSString* tmpDir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"nppftp-copy"];
+			[[NSFileManager defaultManager] createDirectoryAtPath:tmpDir
+			                          withIntermediateDirectories:YES attributes:nil error:nil];
+			std::string tempLocal = std::string(tmpDir.UTF8String) + "/" + m_clipRemoteName;
+			m_copyDestDir = destDir;
+			m_session->DownloadFile(m_clipRemotePath.c_str(), tempLocal.c_str(), false, 3);
+		}
+	}
 }
 void FTPWindowController::ActionMessagesToggle() {
 	m_outputVisible = !m_outputVisible;

@@ -98,6 +98,14 @@ int FTPSession::StartSession(FTPProfile * sessionProfile) {
 
 	m_ftpSettings->GetGlobalCache()->SetEnvironment(m_currentProfile->GetHostname(), m_currentProfile->GetUsername(), m_currentProfile->GetPort());
 
+	// Wire the profile's cache to the global cache. Without a cache parent,
+	// GetCacheLocal()/GetCacheExternal() find no path mapping, so DownloadFileCache
+	// and UploadFileCache silently return "no cache match" and do nothing — which
+	// breaks Download-and-open and upload-on-save. Runtime-created profiles get
+	// this set in the UI, but profiles loaded from XML never did; set it here so
+	// every connected profile can resolve its cache paths.
+	m_currentProfile->SetCacheParent(m_ftpSettings->GetGlobalCache());
+
 	m_mainWrapper = m_currentProfile->CreateWrapper();
 	if (m_mainWrapper == NULL) {
 		m_currentProfile->Release();
@@ -541,6 +549,8 @@ FileObject* FTPSession::GetRootObject() {
 		res = -1;
 	} else {
 		res = m_mainWrapper->Cwd(dir);
+		if (res == -1)
+			OutErr("[NppFTP] Could not change to initial remote dir '%s'", dir);
 	}
 
 	if (res == -1) {
